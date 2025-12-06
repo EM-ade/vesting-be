@@ -4,6 +4,7 @@ import routes from './routes';
 import { requestLogger } from '../middleware/requestLogger';
 import { securityHeaders } from '../middleware/securityHeaders';
 import { apiRateLimiter } from '../middleware/rateLimiter';
+import { projectContextMiddleware } from '../middleware/projectContext';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -33,10 +34,13 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-project-id'],
 }));
 
 app.use(express.json());
+
+// Project context middleware
+app.use(projectContextMiddleware);
 
 // Global rate limiting (100 requests per minute per IP)
 app.use('/api', apiRateLimiter);

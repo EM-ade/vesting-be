@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { createClient } from '@supabase/supabase-js';
+import NodeCache from 'node-cache';
 import { SupabaseService } from '../services/supabaseService';
 import { config } from '../config';
 
@@ -11,11 +12,13 @@ import { config } from '../config';
 export class MetricsController {
   private dbService: SupabaseService;
   private connection: Connection;
+  private cache: NodeCache;
 
   constructor() {
     const supabaseClient = createClient(config.supabaseUrl, config.supabaseServiceRoleKey);
     this.dbService = new SupabaseService(supabaseClient);
     this.connection = new Connection(config.rpcEndpoint, 'confirmed');
+    this.cache = new NodeCache({ stdTTL: 60 }); // Cache for 60 seconds by default
   }
 
   /**
@@ -24,6 +27,13 @@ export class MetricsController {
    */
   async getDashboardMetrics(req: Request, res: Response) {
     try {
+      const cacheKey = 'dashboard_metrics';
+      const cachedData = this.cache.get(cacheKey);
+
+      if (cachedData) {
+        return res.json(cachedData);
+      }
+
       // Get pool balance (from Supabase or blockchain)
       const poolBalance = await this.getPoolBalance();
 
@@ -36,13 +46,16 @@ export class MetricsController {
       // Get cycle window
       const cycleWindow = await this.getCycleWindow();
 
-      res.json({
+      const responseData = {
         poolBalance,
         eligibleWallets,
         nextUnlock,
         cycleWindow,
         lastUpdated: new Date().toISOString(),
-      });
+      };
+
+      this.cache.set(cacheKey, responseData);
+      res.json(responseData);
     } catch (error) {
       console.error('Failed to get dashboard metrics:', error);
       res.status(500).json({
@@ -57,13 +70,23 @@ export class MetricsController {
    */
   async getPoolBalanceEndpoint(req: Request, res: Response) {
     try {
+      const cacheKey = 'pool_balance_endpoint';
+      const cachedData = this.cache.get(cacheKey);
+
+      if (cachedData) {
+        return res.json(cachedData);
+      }
+
       const balance = await this.getPoolBalance();
 
-      res.json({
+      const responseData = {
         balance,
         unit: 'tokens',
         timestamp: new Date().toISOString(),
-      });
+      };
+
+      this.cache.set(cacheKey, responseData);
+      res.json(responseData);
     } catch (error) {
       console.error('Failed to get pool balance:', error);
       res.status(500).json({
@@ -78,12 +101,22 @@ export class MetricsController {
    */
   async getEligibleWalletsEndpoint(req: Request, res: Response) {
     try {
+      const cacheKey = 'eligible_wallets_endpoint';
+      const cachedData = this.cache.get(cacheKey);
+
+      if (cachedData) {
+        return res.json(cachedData);
+      }
+
       const count = await this.getEligibleWalletsCount();
 
-      res.json({
+      const responseData = {
         count,
         timestamp: new Date().toISOString(),
-      });
+      };
+
+      this.cache.set(cacheKey, responseData);
+      res.json(responseData);
     } catch (error) {
       console.error('Failed to get eligible wallets:', error);
       res.status(500).json({
@@ -99,6 +132,12 @@ export class MetricsController {
   async getActivityLog(req: Request, res: Response) {
     try {
       const { limit = 20 } = req.query;
+      const cacheKey = `activity_log_${limit}`;
+      const cachedData = this.cache.get(cacheKey);
+
+      if (cachedData) {
+        return res.json(cachedData);
+      }
 
       const { data, error } = await this.dbService.supabase
         .from('admin_actions')
@@ -108,12 +147,77 @@ export class MetricsController {
 
       if (error) throw error;
 
-      res.json({
+      const responseData = {
         activities: data || [],
         total: data?.length || 0,
-      });
+      };
+
+      this.cache.set(cacheKey, responseData, 10); // Short cache for activity log (10s)
+      res.json(responseData);
     } catch (error) {
       console.error('Failed to get activity log:', error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  /**
+   * GET /api/metrics/claim-history-stats
+   * Get aggregated claim history for charts (last 30 days)
+   */
+  async getClaimHistoryStats(req: Request, res: Response) {
+    try {
+      const cacheKey = 'claim_history_stats';
+      const cachedData = this.cache.get(cacheKey);
+
+      if (cachedData) {
+        return res.json(cachedData);
+      }
+
+      // Get claims from last 30 days
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      
+      const { data, error } = await this.dbService.supabase
+        .from('claim_history')
+        .select('amount_claimed, claimed_at')
+        .gte('claimed_at', thirtyDaysAgo)
+        .order('claimed_at', { ascending: true });
+
+      if (error) throw error;
+
+      // Aggregate by day
+      const claimsByDay = new Map<string, number>();
+      
+      // Initialize last 30 days with 0
+      for (let i = 0; i < 30; i++) {
+        const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+        const dateStr = d.toISOString().split('T')[0]; // YYYY-MM-DD
+        claimsByDay.set(dateStr, 0);
+      }
+
+      data?.forEach((claim: any) => {
+        const dateStr = new Date(claim.claimed_at).toISOString().split('T')[0];
+        const amount = Number(claim.amount_claimed) / 1e9;
+        
+        if (claimsByDay.has(dateStr)) {
+          claimsByDay.set(dateStr, (claimsByDay.get(dateStr) || 0) + amount);
+        }
+      });
+
+      // Convert to array for chart
+      const chartData = Array.from(claimsByDay.entries())
+        .map(([date, amount]) => ({
+          name: new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+          claims: amount,
+          date // keep ISO for sorting if needed
+        }))
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+      this.cache.set(cacheKey, chartData, 300); // Cache charts for 5 minutes
+      res.json(chartData);
+    } catch (error) {
+      console.error('Failed to get claim history stats:', error);
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -149,7 +253,7 @@ export class MetricsController {
     try {
       // Count active vesting records (each represents an eligible wallet)
       const { count } = await this.dbService.supabase
-        .from('vesting')
+        .from('vestings')
         .select('*', { count: 'exact', head: true })
         .eq('is_active', true)
         .eq('is_cancelled', false);

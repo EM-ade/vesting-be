@@ -10,8 +10,9 @@ export class HeliusNFTService {
 
   constructor(apiKey: string, network: 'devnet' | 'mainnet-beta' = 'devnet') {
     this.apiKey = apiKey;
-    // Use correct Helius RPC endpoints
-    this.baseUrl = `https://${network === 'mainnet-beta' ? 'mainnet' : network}.helius-rpc.com/?api-key=${apiKey}`;
+    // Use correct Helius RPC endpoints - ensure no double slash or query params
+    const domain = network === 'mainnet-beta' ? 'mainnet.helius-rpc.com' : 'devnet.helius-rpc.com';
+    this.baseUrl = `https://${domain}`;
   }
 
   /**
@@ -62,7 +63,9 @@ export class HeliusNFTService {
         }
 
         const response = await this.retryWithBackoff(async () => {
-          return await fetch(this.baseUrl, {
+          // Correctly append API key here
+          const url = `${this.baseUrl}/?api-key=${this.apiKey}`;
+          return await fetch(url, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

@@ -1,0 +1,21 @@
+{
+    "name": "Test Snapshot Pool",
+    "description": "NFT-based snapshot pool",
+    "total_pool_amount": 20000,
+    "vesting_duration_days": 60,
+    "cliff_duration_days": 7,
+    "start_time": "2025-12-03T20:00:00Z",
+    "end_time": "2026-02-01T20:00:00Z",
+    "vesting_mode": "snapshot",
+    "rules": [
+        {
+            "name": "OG Holders",
+            "nftContract": "EzjhzaTBqXohJTsaMKFSX6fgXcDJyXAV85NK7RK79u3Z",
+            "threshold": 1,
+            "allocationType": "PERCENTAGE",
+            "allocationValue": 100,
+            "enabled": true
+        }
+    ],
+    "skipStreamflow": true
+}

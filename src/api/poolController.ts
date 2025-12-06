@@ -4,6 +4,8 @@ import { getAccount } from '@solana/spl-token';
 import bs58 from 'bs58';
 import { SupabaseService } from '../services/supabaseService';
 import { StreamflowService } from '../services/streamflowService';
+import { getVaultKeypairForProject } from '../services/vaultService';
+import { syncDynamicPool } from '../utils/syncDynamicPool';
 import { config } from '../config';
 import { getSupabaseClient } from '../lib/supabaseClient';
 
@@ -45,14 +47,15 @@ export class PoolController {
     total_pool_amount: number;
     vesting_mode: string;
     manual_allocations?: Array<{ allocationType: string; allocationValue: number }>;
-    rules?: Array<{ 
-      name: string; 
-      nftContract: string; 
-      threshold: number; 
-      allocationType: string; 
+    rules?: Array<{
+      name: string;
+      nftContract: string;
+      threshold: number;
+      allocationType: string;
       allocationValue: number;
       enabled: boolean;
     }>;
+    projectId?: string; // Add projectId parameter
   }): Promise<ValidationResult> {
     const result: ValidationResult = {
       valid: true,
@@ -69,19 +72,60 @@ export class PoolController {
     };
 
     try {
-      // Parse admin keypair
+      // Get vault keypair (project-specific or fallback to admin)
       let adminKeypair: Keypair;
-      if (config.adminPrivateKey.startsWith('[')) {
-        const secretKey = Uint8Array.from(JSON.parse(config.adminPrivateKey));
-        adminKeypair = Keypair.fromSecretKey(secretKey);
-      } else {
-        const decoded = bs58.decode(config.adminPrivateKey);
-        adminKeypair = Keypair.fromSecretKey(decoded);
+      try {
+        // Try to get project-specific vault first
+        if (params.projectId) {
+          try {
+            adminKeypair = await getVaultKeypairForProject(params.projectId);
+            result.checks.treasury.address = adminKeypair.publicKey.toBase58();
+            console.log(`[VALIDATION] Using project vault: ${result.checks.treasury.address}`);
+          } catch (vaultErr) {
+            console.warn(`[VALIDATION] Failed to get project vault, falling back to admin key:`, vaultErr);
+            // Fallback to admin key
+            if (config.adminPrivateKey.startsWith('[')) {
+              const secretKey = Uint8Array.from(JSON.parse(config.adminPrivateKey));
+              if (secretKey.length !== 64) {
+                throw new Error(`Invalid secret key length: ${secretKey.length} bytes (expected 64)`);
+              }
+              adminKeypair = Keypair.fromSecretKey(secretKey);
+            } else {
+              const decoded = bs58.decode(config.adminPrivateKey);
+              if (decoded.length !== 64) {
+                throw new Error(`Invalid secret key length after base58 decode: ${decoded.length} bytes (expected 64)`);
+              }
+              adminKeypair = Keypair.fromSecretKey(decoded);
+            }
+            result.checks.treasury.address = adminKeypair.publicKey.toBase58();
+          }
+        } else {
+          // No project ID, use admin key
+          if (config.adminPrivateKey.startsWith('[')) {
+            const secretKey = Uint8Array.from(JSON.parse(config.adminPrivateKey));
+            if (secretKey.length !== 64) {
+              throw new Error(`Invalid secret key length: ${secretKey.length} bytes (expected 64)`);
+            }
+            adminKeypair = Keypair.fromSecretKey(secretKey);
+          } else {
+            const decoded = bs58.decode(config.adminPrivateKey);
+            if (decoded.length !== 64) {
+              throw new Error(`Invalid secret key length after base58 decode: ${decoded.length} bytes (expected 64)`);
+            }
+            adminKeypair = Keypair.fromSecretKey(decoded);
+          }
+          result.checks.treasury.address = adminKeypair.publicKey.toBase58();
+        }
+      } catch (err) {
+        result.valid = false;
+        const msg = err instanceof Error ? err.message : 'Unknown key error';
+        result.errors.push(`Treasury Wallet Error: ${msg}`);
+        // Return early as we can't check balances without a wallet
+        return result;
       }
-      result.checks.treasury.address = adminKeypair.publicKey.toBase58();
 
       // 1. Validate timestamp
-      const startTimestamp = params.start_time 
+      const startTimestamp = params.start_time
         ? Math.floor(new Date(params.start_time).getTime() / 1000)
         : Math.floor(Date.now() / 1000);
       const nowTimestamp = Math.floor(Date.now() / 1000);
@@ -117,7 +161,7 @@ export class PoolController {
             config.customTokenMint,
             adminKeypair.publicKey
           );
-          
+
           const tokenAccountInfo = await getAccount(this.connection, treasuryTokenAccount);
           const tokenBalance = Number(tokenAccountInfo.amount) / 1e9;
           result.checks.tokenBalance.current = tokenBalance;
@@ -270,6 +314,7 @@ export class PoolController {
   async validatePool(req: Request, res: Response) {
     try {
       const { start_time, total_pool_amount, vesting_mode, manual_allocations, rules } = req.body;
+      const projectId = req.projectId || req.project?.id;
 
       const validation = await this.validatePoolCreation({
         start_time,
@@ -277,6 +322,7 @@ export class PoolController {
         vesting_mode: vesting_mode || 'snapshot',
         manual_allocations,
         rules,
+        projectId, // Pass projectId
       });
 
       res.json(validation);
@@ -324,12 +370,35 @@ export class PoolController {
         });
       }
 
-      // Run validation
+      // Get project ID for validation and pool creation
+      const poolProjectId = req.projectId || req.project?.id || await (async () => {
+        // Fallback: Get the first available project
+        const { data: projects } = await this.dbService.supabase
+          .from('projects')
+          .select('id')
+          .eq('is_active', true)
+          .limit(1);
+
+        if (projects && projects.length > 0) {
+          console.log(`[CREATE-POOL] No project context, using first available project: ${projects[0].id}`);
+          return projects[0].id;
+        }
+        return null;
+      })();
+
+      if (!poolProjectId) {
+        return res.status(400).json({
+          error: 'No project context available. Please create a project first.',
+        });
+      }
+
+      // Run validation with projectId
       const validation = await this.validatePoolCreation({
         start_time,
         total_pool_amount,
         vesting_mode: vesting_mode || 'snapshot',
         manual_allocations,
+        projectId: poolProjectId, // Pass projectId for vault keypair lookup
       });
 
       // If validation fails and not skipping Streamflow, return error with options
@@ -370,6 +439,7 @@ export class PoolController {
       const { data: stream, error } = await this.dbService.supabase
         .from('vesting_streams')
         .insert({
+          project_id: poolProjectId,
           name,
           description: description || '',
           total_pool_amount,
@@ -381,6 +451,8 @@ export class PoolController {
           end_time: end_time || new Date(Date.now() + vesting_duration_days * 24 * 60 * 60 * 1000).toISOString(),
           is_active: is_active !== undefined ? is_active : true,
           vesting_mode: vesting_mode || 'snapshot',
+          pool_type: (vesting_mode || 'snapshot').toUpperCase(), // Ensure pool_type matches vesting_mode
+          state: 'active', // Explicitly set state to active
           snapshot_taken: vesting_mode === 'manual' ? true : false, // Manual allocations are pre-taken
           nft_requirements: nftRequirements,
           tier_allocations: {}, // Empty object for now
@@ -396,40 +468,58 @@ export class PoolController {
       // If manual mode, create allocations for specified wallets
       if (vesting_mode === 'manual' && manual_allocations && Array.isArray(manual_allocations)) {
         console.log(`Creating ${manual_allocations.length} manual allocations...`);
-        
-        for (const allocation of manual_allocations) {
-          const { wallet, allocationType, allocationValue, note } = allocation;
-          
-          // Calculate token amount based on allocation type
-          let tokenAmount: number;
-          let sharePercentage: number;
-          
-          if (allocationType === 'PERCENTAGE') {
-            sharePercentage = allocationValue;
-            tokenAmount = (total_pool_amount * allocationValue) / 100;
-          } else {
-            // FIXED
-            tokenAmount = allocationValue;
-            sharePercentage = (allocationValue / total_pool_amount) * 100;
-          }
 
+        // Import AllocationCalculator dynamically
+        const { AllocationCalculator } = await import('../services/allocationCalculator');
+
+        // Map frontend input to AllocationInput format
+        const allocationInputs = manual_allocations.map((alloc: any) => ({
+          wallet: alloc.wallet,
+          type: (alloc.allocationType || 'FIXED').toLowerCase() as 'percentage' | 'fixed',
+          value: alloc.allocationValue,
+          note: alloc.note,
+          tier: 1
+        }));
+
+        // Calculate allocations
+        const calculatedAllocations = AllocationCalculator.calculateAllocations(
+          allocationInputs,
+          total_pool_amount
+        );
+
+        // Validate allocations
+        const validation = AllocationCalculator.validateAllocations(
+          calculatedAllocations,
+          total_pool_amount
+        );
+
+        if (!validation.valid) {
+          console.warn(`Allocation validation warning: ${validation.message}`);
+          // We continue anyway but log the warning, or we could throw error
+        }
+
+        for (const allocation of calculatedAllocations) {
           const { error: vestingError } = await this.dbService.supabase
             .from('vestings')
             .insert({
+              project_id: poolProjectId,
               vesting_stream_id: stream.id,
-              user_wallet: wallet,
-              token_amount: tokenAmount,
-              share_percentage: sharePercentage,
-              tier: 1,
+              user_wallet: allocation.wallet,
+              token_amount: allocation.tokenAmount,
+              share_percentage: allocation.percentage,
+              allocation_type: allocation.originalType.toUpperCase(),
+              allocation_value: allocation.originalValue,
+              original_percentage: allocation.percentage, // Store for reference
+              tier: allocation.tier,
               nft_count: 0,
               is_active: true,
               is_cancelled: false,
             });
 
           if (vestingError) {
-            console.error(`Failed to create vesting for ${wallet}:`, vestingError);
+            console.error(`Failed to create vesting for ${allocation.wallet}:`, vestingError);
           } else {
-            console.log(`✅ Allocated ${tokenAmount} tokens (${sharePercentage.toFixed(2)}%) to ${wallet}${note ? ' (' + note + ')' : ''}`);
+            console.log(`✅ Allocated ${allocation.tokenAmount} tokens (${allocation.percentage.toFixed(2)}%) to ${allocation.wallet}${allocation.note ? ' (' + allocation.note + ')' : ''}`);
           }
         }
       }
@@ -438,14 +528,26 @@ export class PoolController {
       let streamflowId = null;
       let streamflowSignature = null;
       let streamflowError = null;
-      
+
       if (!skipStreamflow) {
         try {
           console.log('Auto-deploying pool to Streamflow...');
-          
+
           // Parse admin keypair
           let adminKeypair: Keypair;
-          if (config.adminPrivateKey.startsWith('[')) {
+          let tokenMint = config.customTokenMint!;
+
+          if (req.projectId) {
+            try {
+              adminKeypair = await getVaultKeypairForProject(req.projectId);
+              if (req.project && req.project.mint_address) {
+                tokenMint = new PublicKey(req.project.mint_address);
+              }
+            } catch (err) {
+              console.error('Failed to get project vault:', err);
+              throw new Error('Failed to access project vault');
+            }
+          } else if (config.adminPrivateKey.startsWith('[')) {
             const secretKey = Uint8Array.from(JSON.parse(config.adminPrivateKey));
             adminKeypair = Keypair.fromSecretKey(secretKey);
           } else {
@@ -456,7 +558,7 @@ export class PoolController {
           const startTimestamp = Math.floor(new Date(stream.start_time).getTime() / 1000);
           const endTimestamp = Math.floor(new Date(stream.end_time).getTime() / 1000);
           const nowTimestamp = Math.floor(Date.now() / 1000);
-          
+
           // Validate timestamps for Streamflow
           if (startTimestamp < nowTimestamp) {
             console.warn(`Start time ${startTimestamp} is in the past (now: ${nowTimestamp}). Adjusting to current time + 60 seconds.`);
@@ -464,32 +566,32 @@ export class PoolController {
             const adjustedStart = nowTimestamp + 60;
             const duration = endTimestamp - startTimestamp;
             const adjustedEnd = adjustedStart + duration;
-            
+
             const streamflowResult = await this.streamflowService.createVestingPool({
               adminKeypair,
-              tokenMint: config.customTokenMint!,
+              tokenMint,
               totalAmount: stream.total_pool_amount,
               startTime: adjustedStart,
               endTime: adjustedEnd,
               poolName: stream.name,
             });
-            
+
             streamflowId = streamflowResult.streamId;
             streamflowSignature = streamflowResult.signature;
           } else {
             const streamflowResult = await this.streamflowService.createVestingPool({
               adminKeypair,
-              tokenMint: config.customTokenMint!,
+              tokenMint,
               totalAmount: stream.total_pool_amount,
               startTime: startTimestamp,
-            endTime: endTimestamp,
-            poolName: stream.name,
-          });
-          
-          streamflowId = streamflowResult.streamId;
-          streamflowSignature = streamflowResult.signature;
+              endTime: endTimestamp,
+              poolName: stream.name,
+            });
+
+            streamflowId = streamflowResult.streamId;
+            streamflowSignature = streamflowResult.signature;
           }
-          
+
           // Update DB with Streamflow ID
           await this.dbService.supabase
             .from('vesting_streams')
@@ -504,6 +606,100 @@ export class PoolController {
         }
       } else {
         console.log('Skipping Streamflow deployment (skipStreamflow=true)');
+      }
+
+      // Run immediate sync for snapshot/dynamic pools to populate vestings
+      if (vesting_mode === 'snapshot') {
+        // Snapshot pools: trigger snapshot immediately
+        console.log(`📸 Triggering immediate snapshot for pool: ${stream.name}`);
+        
+        // Import snapshot services
+        const { SnapshotConfigService } = await import('../services/snapshotConfigService');
+        const { HeliusNFTService } = await import('../services/heliusNFTService');
+        
+        const heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+        const snapshotConfigService = new SnapshotConfigService(heliusService);
+        
+        // Convert pool rules to snapshot config
+        const snapshotConfig = {
+          poolSize: stream.total_pool_amount,
+          cycleStartTime: new Date(stream.start_time).getTime(),
+          cycleDuration: stream.vesting_duration_seconds * 1000,
+          rules: nftRequirements.map((rule: any) => ({
+            id: rule.id || `rule_${Date.now()}`,
+            name: rule.name,
+            nftContract: rule.nftContract,
+            threshold: rule.threshold,
+            allocationType: rule.allocationType,
+            allocationValue: rule.allocationValue,
+            enabled: rule.enabled !== false,
+          })),
+        };
+        
+        // Process snapshot asynchronously with better error handling
+        console.log(`[SNAPSHOT] Starting snapshot process for pool ${stream.id}`);
+        console.log(`[SNAPSHOT] Rules:`, JSON.stringify(snapshotConfig.rules, null, 2));
+        
+        snapshotConfigService.processSnapshotRules(snapshotConfig)
+          .then(async (result) => {
+            console.log(`[SNAPSHOT] Process completed. Result:`, JSON.stringify({
+              allocationsCount: result.allocations?.length || 0,
+              totalAllocated: result.totalAllocated,
+              totalWallets: result.totalWallets
+            }, null, 2));
+            
+            if (result.allocations && result.allocations.length > 0) {
+              console.log(`✅ Snapshot found ${result.allocations.length} eligible wallets`);
+              
+              // Create vesting records
+              const vestingRecords = result.allocations.map((allocation: any) => ({
+                project_id: poolProjectId,
+                vesting_stream_id: stream.id,
+                user_wallet: allocation.address,
+                token_amount: allocation.amount,
+                share_percentage: (allocation.amount / stream.total_pool_amount) * 100,
+                nft_count: allocation.sources?.length || 1,
+                tier: 1,
+                is_active: true,
+                is_cancelled: false,
+                snapshot_locked: true,
+              }));
+              
+              console.log(`[SNAPSHOT] Inserting ${vestingRecords.length} vesting records...`);
+              const { error: insertError } = await this.dbService.supabase.from('vestings').insert(vestingRecords);
+              
+              if (insertError) {
+                console.error(`[SNAPSHOT] Failed to insert vestings:`, insertError);
+                throw insertError;
+              }
+              
+              // Mark snapshot as taken
+              const { error: updateError } = await this.dbService.supabase
+                .from('vesting_streams')
+                .update({ snapshot_taken: true })
+                .eq('id', stream.id);
+              
+              if (updateError) {
+                console.error(`[SNAPSHOT] Failed to mark snapshot as taken:`, updateError);
+              }
+              
+              console.log(`✅ Snapshot completed: ${vestingRecords.length} vestings created for pool ${stream.id}`);
+            } else {
+              console.warn(`⚠️ No eligible wallets found for snapshot pool ${stream.name}`);
+              console.warn(`[SNAPSHOT] Check: 1) NFT contract is correct, 2) Threshold settings, 3) Helius API key`);
+            }
+          })
+          .catch(err => {
+            console.error(`❌ Failed to process snapshot for pool ${stream.id}:`, err);
+            console.error(`[SNAPSHOT] Error details:`, err.message || err);
+            console.error(`[SNAPSHOT] Stack trace:`, err.stack);
+          });
+      } else if (vesting_mode === 'dynamic') {
+        // Dynamic pools: trigger initial sync
+        console.log(`🔄 Triggering initial sync for dynamic pool: ${stream.name}`);
+        syncDynamicPool(stream).catch(err => {
+          console.error(`❌ Failed to sync pool ${stream.id}:`, err);
+        });
       }
 
       res.json({
@@ -532,10 +728,28 @@ export class PoolController {
   async listPools(req: Request, res: Response) {
     try {
       // Get all vesting streams from database
-      const { data: streams, error } = await this.dbService.supabase
+      let query = this.dbService.supabase
         .from('vesting_streams')
         .select('*')
         .order('created_at', { ascending: false });
+
+      // IMPORTANT: Remove default projectId filtering if not explicitly provided or if global admin
+      // Currently the frontend doesn't seem to be sending projectId in all cases, or the middleware isn't attaching it correctly for global view.
+      // If you want to list *all* pools for the admin dashboard, you might want to relax this check or ensure the frontend sends the correct ID.
+
+      // Check if req.projectId is valid and not just a placeholder (if any logic sets it)
+      if (req.projectId && req.projectId !== 'undefined' && req.projectId !== 'null') {
+        query = query.eq('project_id', req.projectId);
+      } else {
+        // Fallback: If no project ID is provided, maybe we want to list everything for now to debug?
+        // Or we can check if there's a query param
+        const projectIdParam = req.query.projectId as string;
+        if (projectIdParam) {
+          query = query.eq('project_id', projectIdParam);
+        }
+      }
+
+      const { data: streams, error } = await query;
 
       if (error) {
         throw new Error(`Failed to fetch pools: ${error.message}`);
@@ -543,6 +757,9 @@ export class PoolController {
 
       // Enrich with Streamflow status and stats
       const pools = await Promise.all((streams || []).map(async (stream: any) => {
+        // DEBUG: Log raw state from DB
+        // console.log(`Pool ${stream.id} raw DB state: ${stream.state}, is_active: ${stream.is_active}`);
+
         // Get user count and allocation stats
         const { data: vestings } = await this.dbService.supabase
           .from('vestings')
@@ -580,7 +797,13 @@ export class PoolController {
           endTime: stream.end_time,
           streamflowId: stream.streamflow_stream_id,
           vestingMode: stream.vesting_mode,
-          state: stream.state || 'active',
+          // Sanitize state (handle 'stable' legacy value)
+          // If state is explicitly 'cancelled', respect it. Otherwise infer from is_active.
+          state: (stream.state === 'cancelled')
+            ? 'cancelled'
+            : (stream.state === 'stable' || !stream.state || stream.state === 'active')
+              ? (stream.is_active ? 'active' : 'cancelled')
+              : stream.state,
           createdAt: stream.created_at,
           stats: {
             userCount,
@@ -636,10 +859,57 @@ export class PoolController {
         nftRequirements: stream.nft_requirements || [],
         tierAllocations: stream.tier_allocations || {},
         vestingMode: stream.vesting_mode,
-        state: stream.state || 'active',
+        // Sanitize state (handle 'stable' legacy value)
+        state: (stream.state === 'stable' || !stream.state)
+          ? (stream.is_active ? 'active' : 'cancelled')
+          : stream.state,
       });
     } catch (error) {
       console.error('Failed to get pool details:', error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  /**
+   * PUT /api/pools/:id
+   * Update pool details (name, description)
+   */
+  async updatePool(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const { name, description } = req.body;
+
+      if (!id) {
+        return res.status(400).json({ error: 'Pool ID is required' });
+      }
+
+      const updates: any = {};
+      if (name !== undefined) updates.name = name;
+      if (description !== undefined) updates.description = description;
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: 'No fields to update' });
+      }
+
+      const { data: pool, error } = await this.dbService.supabase
+        .from('vesting_streams')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        throw new Error(`Failed to update pool: ${error.message}`);
+      }
+
+      res.json({
+        success: true,
+        pool,
+      });
+    } catch (error) {
+      console.error('Failed to update pool:', error);
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -672,7 +942,7 @@ export class PoolController {
 
       // Update the specific rule
       const nftRequirements = pool.nft_requirements || [];
-      const ruleIndex = nftRequirements.findIndex((r: any) => 
+      const ruleIndex = nftRequirements.findIndex((r: any) =>
         r.name === ruleId || nftRequirements.indexOf(r).toString() === ruleId.replace('rule-', '')
       );
 
@@ -713,11 +983,13 @@ export class PoolController {
   /**
    * PUT /api/pools/:id/allocations
    * Update manual pool allocations (add/remove/edit wallets)
+   * Uses AllocationCalculator to properly handle percentage and fixed allocations
    */
   async updateAllocations(req: Request, res: Response) {
     try {
       const { id } = req.params;
       const { allocations } = req.body;
+      const projectId = req.projectId || req.project?.id;
 
       if (!id || !allocations || !Array.isArray(allocations)) {
         return res.status(400).json({ error: 'Pool ID and allocations array are required' });
@@ -736,46 +1008,39 @@ export class PoolController {
 
       // Only allow editing manual mode pools
       if (pool.vesting_mode !== 'manual') {
-        return res.status(400).json({ 
-          error: 'Only manual mode pools can have allocations edited directly' 
+        return res.status(400).json({
+          error: 'Only manual mode pools can have allocations edited directly'
         });
       }
+
+      // Import AllocationCalculator
+      const { AllocationCalculator } = await import('../services/allocationCalculator');
+
+      // Map input to AllocationInput format
+      const allocationInputs = allocations.map((alloc: any) => ({
+        wallet: alloc.wallet,
+        type: (alloc.allocationType || 'FIXED').toLowerCase() as 'percentage' | 'fixed',
+        value: alloc.allocationValue,
+        note: alloc.note,
+        tier: alloc.tier || 1
+      }));
+
+      // Calculate allocations
+      const calculatedAllocations = AllocationCalculator.calculateAllocations(
+        allocationInputs,
+        pool.total_pool_amount
+      );
 
       // Validate allocations
-      let totalPercentage = 0;
-      let totalFixed = 0;
+      const validation = AllocationCalculator.validateAllocations(
+        calculatedAllocations,
+        pool.total_pool_amount
+      );
 
-      for (const allocation of allocations) {
-        if (!allocation.wallet || allocation.wallet.length < 32) {
-          return res.status(400).json({ 
-            error: `Invalid wallet address: ${allocation.wallet}` 
-          });
-        }
-
-        if (allocation.allocationValue <= 0) {
-          return res.status(400).json({ 
-            error: `Allocation value must be greater than 0 for wallet ${allocation.wallet}` 
-          });
-        }
-
-        if (allocation.allocationType === 'PERCENTAGE') {
-          totalPercentage += allocation.allocationValue;
-        } else {
-          totalFixed += allocation.allocationValue;
-        }
-      }
-
-      // Check if percentages exceed 100%
-      if (totalPercentage > 100) {
-        return res.status(400).json({ 
-          error: `Percentage allocations sum to ${totalPercentage.toFixed(2)}%, which exceeds 100%` 
-        });
-      }
-
-      // Check if fixed amounts exceed pool
-      if (totalFixed > pool.total_pool_amount) {
-        return res.status(400).json({ 
-          error: `Fixed allocations (${totalFixed}) exceed pool amount (${pool.total_pool_amount})` 
+      if (!validation.valid) {
+        return res.status(400).json({
+          error: 'Allocation validation failed',
+          details: validation.message
         });
       }
 
@@ -789,30 +1054,21 @@ export class PoolController {
         throw new Error(`Failed to delete old allocations: ${deleteError.message}`);
       }
 
-      // Insert new allocations
-      const vestingRecords = allocations.map((allocation: any) => {
-        let tokenAmount: number;
-        let sharePercentage: number;
-
-        if (allocation.allocationType === 'PERCENTAGE') {
-          sharePercentage = allocation.allocationValue;
-          tokenAmount = (pool.total_pool_amount * allocation.allocationValue) / 100;
-        } else {
-          tokenAmount = allocation.allocationValue;
-          sharePercentage = (allocation.allocationValue / pool.total_pool_amount) * 100;
-        }
-
-        return {
-          vesting_stream_id: id,
-          user_wallet: allocation.wallet,
-          token_amount: tokenAmount,
-          share_percentage: sharePercentage,
-          tier: 1,
-          nft_count: 0,
-          is_active: true,
-          is_cancelled: false,
-        };
-      });
+      // Insert new allocations with metadata
+      const vestingRecords = calculatedAllocations.map(allocation => ({
+        project_id: projectId,
+        vesting_stream_id: id,
+        user_wallet: allocation.wallet,
+        token_amount: allocation.tokenAmount,
+        share_percentage: allocation.percentage,
+        allocation_type: allocation.originalType.toUpperCase(),
+        allocation_value: allocation.originalValue,
+        original_percentage: allocation.percentage,
+        tier: allocation.tier,
+        nft_count: 0,
+        is_active: true,
+        is_cancelled: false,
+      }));
 
       const { error: insertError } = await this.dbService.supabase
         .from('vestings')
@@ -825,7 +1081,8 @@ export class PoolController {
       res.json({
         success: true,
         message: `Successfully updated allocations for ${allocations.length} wallet(s)`,
-        allocations: vestingRecords,
+        count: vestingRecords.length,
+        allocations: calculatedAllocations,
       });
     } catch (error) {
       console.error('Failed to update allocations:', error);
@@ -902,8 +1159,8 @@ export class PoolController {
 
       // Only allow adding rules to dynamic pools
       if (pool.vesting_mode !== 'dynamic') {
-        return res.status(400).json({ 
-          error: 'Can only add rules to dynamic pools. Snapshot pools are immutable after creation.' 
+        return res.status(400).json({
+          error: 'Can only add rules to dynamic pools. Snapshot pools are immutable after creation.'
         });
       }
 
@@ -954,28 +1211,28 @@ export class PoolController {
   async syncPool(req: Request, res: Response) {
     try {
       const { id } = req.params;
-      
+
       // Get pool
       const { data: pool } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
         .eq('id', id)
         .single();
-      
+
       if (!pool) {
         return res.status(404).json({ error: 'Pool not found' });
       }
-      
+
       if (pool.vesting_mode !== 'dynamic') {
         return res.status(400).json({ error: 'Can only sync dynamic pools' });
       }
-      
+
       console.log('🔄 Manually triggering sync for pool:', pool.name);
-      
+
       // Import and run sync
       const { syncDynamicPool } = require('../utils/syncDynamicPool');
       await syncDynamicPool(pool);
-      
+
       res.json({ success: true, message: 'Sync completed' });
     } catch (error) {
       console.error('Sync failed:', error);
@@ -1011,8 +1268,8 @@ export class PoolController {
           .eq('snapshot_locked', true);
 
         if (vestings && vestings.length > 0) {
-          return res.status(400).json({ 
-            error: 'Cannot cancel snapshot pool with locked allocations. Users have already been allocated tokens.' 
+          return res.status(400).json({
+            error: 'Cannot cancel snapshot pool with locked allocations. Users have already been allocated tokens.'
           });
         }
       }
@@ -1038,15 +1295,33 @@ export class PoolController {
         }
       }
 
-      // Deactivate pool in database
-      const { error: updateError } = await this.dbService.supabase
+      // Deactivate pool in database - explicitly update state
+      const { data: updatedPool, error: updateError } = await this.dbService.supabase
         .from('vesting_streams')
-        .update({ is_active: false })
-        .eq('id', id);
+        .update({
+          is_active: false,
+          state: 'cancelled'
+        })
+        .eq('id', id)
+        .select()
+        .single();
 
       if (updateError) {
+        console.error('DB Update Error:', updateError);
         throw new Error(`Failed to deactivate pool: ${updateError.message}`);
       }
+
+      // Double check the update
+      if (updatedPool.state !== 'cancelled') {
+        console.warn(`⚠️ Pool ${id} update mismatch. Requested 'cancelled', got '${updatedPool.state}'. Retrying force update.`);
+        // Force retry just state
+        await this.dbService.supabase
+          .from('vesting_streams')
+          .update({ state: 'cancelled' })
+          .eq('id', id);
+      }
+
+      console.log(`Pool ${id} deactivated. Final state: ${updatedPool?.state}, is_active: ${updatedPool?.is_active}`);
 
       // Deactivate all user vestings
       await this.dbService.supabase
@@ -1057,6 +1332,7 @@ export class PoolController {
       res.json({
         success: true,
         message: 'Pool cancelled successfully',
+        pool: updatedPool
       });
     } catch (error) {
       console.error('Failed to cancel pool:', error);
@@ -1106,7 +1382,7 @@ export class PoolController {
       // Create Streamflow pool
       const startTime = Math.floor(new Date(pool.start_time).getTime() / 1000);
       const endTime = Math.floor(new Date(pool.end_time).getTime() / 1000);
-      
+
       const result = await this.streamflowService.createVestingPool({
         adminKeypair,
         tokenMint: config.customTokenMint!,
@@ -1160,14 +1436,14 @@ export class PoolController {
       // If streamflowId provided directly, use it
       if (streamflowId) {
         streamId = streamflowId;
-        
+
         // Try to find pool in database for cleanup
         const { data: pool } = await this.dbService.supabase
           .from('vesting_streams')
           .select('id')
           .eq('streamflow_stream_id', streamflowId)
           .single();
-        
+
         if (pool) {
           poolId = pool.id;
         }
@@ -1211,8 +1487,9 @@ export class PoolController {
       if (poolId) {
         await this.dbService.supabase
           .from('vesting_streams')
-          .update({ 
+          .update({
             is_active: false,
+            state: 'cancelled', // Explicitly update state
             streamflow_stream_id: null // Clear Streamflow ID
           })
           .eq('id', poolId);
@@ -1309,6 +1586,228 @@ export class PoolController {
       console.error('Failed to get user status:', error);
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  /**
+   * DELETE /api/pools/:id
+   * Delete a vesting pool (only if not started)
+   */
+  async deletePool(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+
+      // Get pool details
+      const { data: pool, error: fetchError } = await this.dbService.supabase
+        .from('vesting_streams')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      if (fetchError || !pool) {
+        return res.status(404).json({ error: 'Pool not found' });
+      }
+
+      // Check if pool has started (ignore paused pools - they can still be deleted if not started)
+      const startTime = new Date(pool.start_time);
+      const now = new Date();
+
+      if (startTime <= now && pool.state !== 'paused') {
+        return res.status(400).json({
+          error: 'Cannot delete a pool that has already started. Use cancel instead.',
+          suggestion: 'Use PATCH /api/pools/:id/cancel or the cancel action from admin interface'
+        });
+      }
+
+      // Allow deletion of paused pools that have started (admin override)
+      if (pool.state === 'paused') {
+        console.log(`Allowing deletion of paused pool: ${pool.name}`);
+      }
+
+      // Delete pool (cascade will delete vestings)
+      const { error: deleteError } = await this.dbService.supabase
+        .from('vesting_streams')
+        .delete()
+        .eq('id', id);
+
+      if (deleteError) {
+        throw new Error(`Failed to delete pool: ${deleteError.message}`);
+      }
+
+      res.json({
+        success: true,
+        message: 'Pool deleted successfully',
+      });
+    } catch (error) {
+      console.error('Failed to delete pool:', error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  /**
+   * PUT /api/pools/:id/details
+   * Update pool name and description
+   */
+  async updatePoolDetails(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const { name, description } = req.body;
+
+      if (!name && !description) {
+        return res.status(400).json({
+          error: 'At least one field (name or description) is required',
+        });
+      }
+
+      const updates: any = {};
+      if (name) updates.name = name;
+      if (description !== undefined) updates.description = description;
+
+      const { data, error } = await this.dbService.supabase
+        .from('vesting_streams')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        throw new Error(`Failed to update pool: ${error.message}`);
+      }
+
+      res.json({
+        success: true,
+        message: 'Pool updated successfully',
+        pool: data,
+      });
+    } catch (error) {
+      console.error('Failed to update pool details:', error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  /**
+   * POST /api/pools/:id/snapshot
+   * Trigger snapshot for a snapshot pool and create vestings from NFT holders
+   */
+  async triggerSnapshot(req: Request, res: Response) {
+    try {
+      const { id } = req.params;
+      const projectId = req.projectId || req.project?.id;
+
+      // Get pool info
+      const { data: pool } = await this.dbService.supabase
+        .from('vesting_streams')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      if (!pool) {
+        return res.status(404).json({ error: 'Pool not found' });
+      }
+
+      if (pool.vesting_mode !== 'snapshot') {
+        return res.status(400).json({ error: 'Only snapshot pools support snapshot triggering' });
+      }
+
+      if (pool.snapshot_taken) {
+        return res.status(400).json({ error: 'Snapshot has already been taken for this pool' });
+      }
+
+      // Check if pool has rules defined
+      if (!pool.nft_requirements || pool.nft_requirements.length === 0) {
+        return res.status(400).json({ error: 'Pool has no snapshot rules defined' });
+      }
+
+      console.log(`🔄 Processing snapshot for pool: ${pool.name}`);
+
+      // Import snapshot services
+      const { SnapshotConfigService } = await import('../services/snapshotConfigService');
+      const { HeliusNFTService } = await import('../services/heliusNFTService');
+      const { config } = await import('../config');
+
+      const heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+      const snapshotConfigService = new SnapshotConfigService(heliusService);
+
+      // Convert pool rules to snapshot config format
+      const snapshotConfig = {
+        poolSize: pool.total_pool_amount,
+        cycleStartTime: new Date(pool.start_time).getTime(),
+        cycleDuration: pool.vesting_duration_seconds * 1000, // Convert to milliseconds
+        rules: pool.nft_requirements.map((rule: any) => ({
+          id: rule.id || `rule_${Date.now()}`,
+          name: rule.name,
+          nftContract: rule.nftContract,
+          threshold: rule.threshold,
+          allocationType: rule.allocationType,
+          allocationValue: rule.allocationValue,
+          enabled: rule.enabled !== false,
+        })),
+      };
+
+      // Process snapshot rules to get allocations
+      const result = await snapshotConfigService.processSnapshotRules(snapshotConfig);
+
+      if (!result.allocations || result.allocations.length === 0) {
+        return res.status(400).json({
+          error: 'Snapshot processed but no eligible wallets found',
+          breakdown: result.breakdown,
+          totalWallets: result.totalWallets
+        });
+      }
+
+      console.log(`✅ Found ${result.allocations.length} eligible wallets`);
+
+      // Create vesting records for each allocation
+      const vestingRecords = result.allocations.map((allocation: any) => ({
+        project_id: projectId,
+        vesting_stream_id: pool.id,
+        user_wallet: allocation.address,
+        token_amount: allocation.amount,
+        share_percentage: (allocation.amount / pool.total_pool_amount) * 100,
+        nft_count: allocation.sources?.length || 1,
+        tier: 1,
+        is_active: true,
+        is_cancelled: false,
+        snapshot_locked: true, // Lock snapshot allocations
+      }));
+
+      const { error: insertError } = await this.dbService.supabase
+        .from('vestings')
+        .insert(vestingRecords);
+
+      if (insertError) {
+        throw new Error(`Failed to create vesting records: ${insertError.message}`);
+      }
+
+      // Mark pool snapshot as taken
+      await this.dbService.supabase
+        .from('vesting_streams')
+        .update({ snapshot_taken: true })
+        .eq('id', id);
+
+      console.log(`✅ Snapshot completed: ${vestingRecords.length} vestings created`);
+
+      res.json({
+        success: true,
+        message: `Snapshot completed successfully`,
+        summary: {
+          eligibleWallets: result.allocations.length,
+          totalAllocated: result.totalAllocated,
+          totalWallets: result.totalWallets,
+          vestingsCreated: vestingRecords.length,
+          breakdown: result.breakdown,
+        },
+        allocations: result.allocations,
+      });
+    } catch (error) {
+      console.error('Failed to trigger snapshot:', error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   }

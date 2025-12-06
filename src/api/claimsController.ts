@@ -24,27 +24,37 @@ export class ClaimsController {
       const { limit = 50, offset = 0, status, wallet } = req.query;
 
       let query = this.dbService.supabase
-        .from('claims')
+        .from('claim_history')
         .select('*')
-        .order('created_at', { ascending: false })
+        .order('claimed_at', { ascending: false })
         .range(Number(offset), Number(offset) + Number(limit) - 1);
 
       if (status) {
-        query = query.eq('status', status);
+        // claim_history doesn't have status, assuming all are 'approved' or 'completed'
+        // query = query.eq('status', status); 
       }
 
       if (wallet) {
-        query = query.eq('wallet', wallet);
+        query = query.eq('user_wallet', wallet);
       }
 
       const { data, error } = await query;
 
       if (error) throw error;
 
-      res.json({
-        claims: data || [],
-        total: data?.length || 0,
-      });
+      // Map columns to match expected interface (frontend expects these field names)
+      const claims = (data || []).map((c: any) => ({
+        id: c.id,
+        user_wallet: c.user_wallet,  // Frontend expects user_wallet, not wallet
+        pool_id: c.pool_id,
+        pool_name: c.pool_name,
+        amount: Number(c.amount_claimed) / 1e9, // Convert base units to tokens
+        timestamp: c.claimed_at,  // Frontend expects timestamp, not created_at
+        status: 'completed', // Default for history
+        signature: c.transaction_signature  // Frontend expects signature
+      }));
+
+      res.json(claims);  // Return array directly, frontend handles both formats
     } catch (error) {
       console.error('Failed to list claims:', error);
       res.status(500).json({
@@ -61,41 +71,47 @@ export class ClaimsController {
     try {
       // Get total claims count
       const { count: totalClaims } = await this.dbService.supabase
-        .from('claims')
+        .from('claim_history')
         .select('*', { count: 'exact', head: true });
 
-      // Get approved claims
-      const { count: approvedClaims } = await this.dbService.supabase
-        .from('claims')
-        .select('*', { count: 'exact', head: true })
-        .eq('status', 'approved');
-
-      // Get flagged claims
-      const { count: flaggedClaims } = await this.dbService.supabase
-        .from('claims')
-        .select('*', { count: 'exact', head: true })
-        .eq('status', 'flagged');
+      // claim_history only stores successful claims, so approved = total
+      const approvedClaims = totalClaims;
+      const flaggedClaims = 0; // No flag support in claim_history yet
 
       // Get total amount claimed (sum)
       const { data: claimData } = await this.dbService.supabase
-        .from('claims')
-        .select('amount');
+        .from('claim_history')
+        .select('amount_claimed');
 
-      const totalAmountClaimed = claimData?.reduce((sum: number, c: any) => sum + (c.amount || 0), 0) || 0;
+      const totalAmountClaimed = claimData?.reduce((sum: number, c: any) => sum + (Number(c.amount_claimed) || 0), 0) / 1e9 || 0;
 
       // Get claims in last 24h
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const { count: claims24h } = await this.dbService.supabase
-        .from('claims')
+        .from('claim_history')
         .select('*', { count: 'exact', head: true })
-        .gte('created_at', yesterday);
+        .gte('claimed_at', yesterday);
+
+      // Get claims in last 7 days
+      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const { count: claims7d } = await this.dbService.supabase
+        .from('claim_history')
+        .select('*', { count: 'exact', head: true })
+        .gte('claimed_at', weekAgo);
+
+      // Get unique users
+      const { data: uniqueUsers } = await this.dbService.supabase
+        .from('claim_history')
+        .select('user_wallet');
+      
+      const uniqueUserCount = new Set(uniqueUsers?.map((u: any) => u.user_wallet)).size;
 
       res.json({
-        totalClaims: totalClaims || 0,
-        approvedClaims: approvedClaims || 0,
-        flaggedClaims: flaggedClaims || 0,
-        totalAmountClaimed,
-        claims24h: claims24h || 0,
+        total: totalClaims || 0,
+        last24h: claims24h || 0,
+        last7d: claims7d || 0,
+        totalAmount: totalAmountClaimed,
+        uniqueUsers: uniqueUserCount,
       });
     } catch (error) {
       console.error('Failed to get claim stats:', error);
@@ -118,7 +134,7 @@ export class ClaimsController {
       }
 
       const { data, error } = await this.dbService.supabase
-        .from('claims')
+        .from('claim_history')
         .select('*')
         .eq('id', id)
         .single();
@@ -151,22 +167,25 @@ export class ClaimsController {
         return res.status(400).json({ error: 'Claim ID and adminWallet are required' });
       }
 
-      const { error } = await this.dbService.supabase
-        .from('claims')
-        .update({ status: 'flagged', flag_reason: reason })
-        .eq('id', id);
-
-      if (error) throw error;
-
-      await this.dbService.logAdminAction({
-        action: 'flag_claim',
-        admin_wallet: adminWallet,
-        details: { claimId: id, reason },
-      });
+      // Note: claim_history table doesn't have status/flag_reason columns
+      // For now, log the flag action in admin_actions table
+      // TODO: Add flagged_claims table or add columns to claim_history
+      
+      await this.dbService.supabase
+        .from('admin_actions')
+        .insert({
+          action: 'flag_claim',
+          admin_wallet: adminWallet,
+          details: { claimId: id, reason },
+          target_type: 'claim',
+          target_id: id,
+          created_at: new Date().toISOString(),
+        });
 
       res.json({
         success: true,
-        message: 'Claim flagged successfully',
+        message: 'Claim flagged successfully (logged in admin actions)',
+        note: 'Flag tracking requires database schema update',
       });
     } catch (error) {
       console.error('Failed to flag claim:', error);
@@ -189,19 +208,26 @@ export class ClaimsController {
       }
 
       const { data, error } = await this.dbService.supabase
-        .from('claims')
+        .from('claim_history')
         .select('*')
-        .eq('wallet', wallet)
-        .order('created_at', { ascending: false });
+        .eq('user_wallet', wallet)
+        .order('claimed_at', { ascending: false });
 
       if (error) throw error;
 
-      res.json({
-        wallet,
-        claims: data || [],
-        totalClaims: data?.length || 0,
-        totalAmount: data?.reduce((sum: number, c: any) => sum + (c.amount || 0), 0) || 0,
-      });
+      // Map to frontend format
+      const claims = (data || []).map((c: any) => ({
+        id: c.id,
+        user_wallet: c.user_wallet,
+        pool_id: c.pool_id,
+        pool_name: c.pool_name,
+        amount: Number(c.amount_claimed) / 1e9,
+        timestamp: c.claimed_at,
+        status: 'completed',
+        signature: c.transaction_signature
+      }));
+
+      res.json(claims);  // Return array directly
     } catch (error) {
       console.error('Failed to get wallet claims:', error);
       res.status(500).json({
