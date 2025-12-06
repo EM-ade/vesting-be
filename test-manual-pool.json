@@ -1,0 +1,23 @@
+{
+    "name": "Test Manual Pool",
+    "description": "Manual allocation test pool",
+    "total_pool_amount": 10000,
+    "vesting_duration_days": 30,
+    "cliff_duration_days": 0,
+    "start_time": "2025-12-03T20:00:00Z",
+    "end_time": "2026-01-02T20:00:00Z",
+    "vesting_mode": "manual",
+    "manual_allocations": [
+        {
+            "wallet": "ABjnax7QfDmG6wR2KJoNc3UyiouwTEZ3b5tnTrLLyNSp",
+            "allocationType": "FIXED",
+            "allocationValue": 5000
+        },
+        {
+            "wallet": "ABjnax7QfDmG6wR2KJoNc3UyiouwTEZ3b5tnTrLLyNSp",
+            "allocationType": "PERCENTAGE",
+            "allocationValue": 25
+        }
+    ],
+    "skipStreamflow": true
+}

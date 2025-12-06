@@ -1,0 +1,21 @@
+{
+    "name": "Test Dynamic Pool",
+    "description": "Dynamic NFT tracking pool",
+    "total_pool_amount": 15000,
+    "vesting_duration_days": 45,
+    "cliff_duration_days": 3,
+    "start_time": "2025-12-03T20:00:00Z",
+    "end_time": "2026-01-17T20:00:00Z",
+    "vesting_mode": "dynamic",
+    "rules": [
+        {
+            "name": "Active Holders",
+            "nftContract": "EzjhzaTBqXohJTsaMKFSX6fgXcDJyXAV85NK7RK79u3Z",
+            "threshold": 1,
+            "allocationType": "PERCENTAGE",
+            "allocationValue": 100,
+            "enabled": true
+        }
+    ],
+    "skipStreamflow": true
+}

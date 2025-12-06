@@ -26,14 +26,40 @@ export class ConfigController {
   async checkAdmin(req: Request, res: Response) {
     try {
       const { wallet } = req.query;
+      const projectId = req.query.projectId as string;
 
       if (!wallet || typeof wallet !== 'string') {
         return res.status(400).json({ error: 'wallet parameter is required' });
       }
 
-      // Check against ADMIN_WALLETS environment variable
+      // 1. Check Super Admin (Environment Variable)
       const adminWalletsEnv = process.env.ADMIN_WALLETS || '';
+      const adminWallets = adminWalletsEnv
+        .split(',')
+        .map(w => w.trim())
+        .filter(w => w.length > 0);
       
+      if (adminWallets.includes(wallet)) {
+        return res.json({ success: true, isAdmin: true, role: 'super_admin' });
+      }
+
+      // 2. Check Project Admin (Database)
+      if (projectId) {
+        // Use supabaseClient directly since auth middleware might not have run on this public-ish route
+        // or we are just checking status
+        const { data: access } = await this.dbService.supabase
+          .from('user_project_access')
+          .select('role')
+          .eq('project_id', projectId)
+          .eq('wallet_address', wallet)
+          .single();
+
+        if (access && (access.role === 'admin' || access.role === 'owner')) {
+          return res.json({ success: true, isAdmin: true, role: access.role });
+        }
+      }
+
+      // Fallback legacy check (single tenant config)
       if (!adminWalletsEnv) {
         console.warn('⚠️  ADMIN_WALLETS environment variable not set, falling back to database');
         
@@ -64,16 +90,13 @@ export class ConfigController {
       }
 
       // Parse comma-separated list of admin wallets
-      const adminWallets = adminWalletsEnv
-        .split(',')
-        .map(w => w.trim())
-        .filter(w => w.length > 0);
+      // Already checked above
       
-      const isAdmin = adminWallets.includes(wallet);
+      // const isAdmin = adminWallets.includes(wallet); // Redundant
 
       res.json({
         success: true,
-        isAdmin,
+        isAdmin: false, // If we reached here without returning, they are not admin (unless fallback above returned)
       });
     } catch (error) {
       console.error('Failed to check admin:', error);

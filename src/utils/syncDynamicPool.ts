@@ -11,6 +11,12 @@ export async function syncDynamicPool(pool: any) {
   console.log(`\n🔄 Syncing dynamic pool: ${pool.name}`);
   console.log(`Pool ID: ${pool.id}`);
   
+  // GUARD: Do not sync if pool is cancelled or not active
+  if (pool.state === 'cancelled' || pool.is_active === false) {
+    console.log('🛑 Pool is cancelled or inactive. Aborting sync to prevent zombie reactivation.');
+    return;
+  }
+
   const connection = getConnection();
   const supabase = createClient(
     process.env.SUPABASE_URL!,
@@ -56,13 +62,17 @@ export async function syncDynamicPool(pool: any) {
         continue;
       }
       
-      // Get NFT holders using Helius with retry logic
-      console.log(`  🔍 Fetching NFT holders from Helius...`);
+      console.log(`  🔍 Fetching NFT holders from Helius for ${nftContract.toBase58()}...`);
       const heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
       
       let holders;
       try {
         holders = await heliusService.getAllHolders(nftContract);
+        console.log(`  ✅ Helius response: Found ${holders.length} holders`);
+        // Debug: Log first 3 holders
+        if (holders.length > 0) {
+            console.log(`  Example holders: ${holders.slice(0, 3).map(h => `${h.wallet} (${h.nftCount})`).join(', ')}`);
+        }
       } catch (heliusError) {
         console.error(`  ❌ Failed to fetch holders from Helius:`, heliusError);
         console.log(`  ⚠️ Skipping rule "${rule.name}" due to Helius API error`);
@@ -111,6 +121,7 @@ export async function syncDynamicPool(pool: any) {
         
         if (existing) {
           // Update existing allocation (and reactivate if it was cancelled)
+          // GUARD: Only reactivate if pool is still active (double check)
           const { error: updateError } = await dbService.supabase
             .from('vestings')
             .update({
@@ -137,9 +148,9 @@ export async function syncDynamicPool(pool: any) {
               token_amount: allocationPerUser,
               nft_count: holder.nftCount,
               tier: 1, // Default tier for dynamic vesting
-              vesting_mode: 'dynamic',
+              vesting_mode: pool.vesting_mode || 'dynamic',
               is_active: true,
-              snapshot_locked: false,
+              snapshot_locked: pool.vesting_mode === 'snapshot', // Lock if snapshot mode
             });
           
           if (insertError) {
@@ -200,6 +211,24 @@ export async function syncDynamicPool(pool: any) {
     }
   } catch (error) {
     console.error('  ❌ Error checking for removed users:', error);
+  }
+
+  // UPDATE SNAPSHOT FLAG (Fix for Issue 1)
+  if (pool.vesting_mode === 'snapshot' && !pool.snapshot_taken) {
+    console.log('📸 Marking snapshot as taken...');
+    const { error: snapshotError } = await dbService.supabase
+      .from('vesting_streams')
+      .update({ 
+        snapshot_taken: true,
+        snapshot_date: new Date().toISOString()
+      })
+      .eq('id', pool.id);
+    
+    if (snapshotError) {
+      console.error('❌ Failed to update snapshot_taken flag:', snapshotError);
+    } else {
+      console.log('✅ Snapshot marked as complete.');
+    }
   }
   
   console.log(`\n✅ Sync completed for pool: ${pool.name}\n`);

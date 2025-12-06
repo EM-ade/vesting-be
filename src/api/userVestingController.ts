@@ -2,12 +2,15 @@ import { Request, Response } from 'express';
 import { Connection, Keypair, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { getAssociatedTokenAddress, createTransferInstruction, getAccount, createAssociatedTokenAccountInstruction } from '@solana/spl-token';
 import { createClient } from '@supabase/supabase-js';
+import bs58 from 'bs58';
 import { SupabaseService } from '../services/supabaseService';
 import { StreamflowService } from '../services/streamflowService';
 import { PriceService } from '../services/priceService';
+import { getVaultKeypairForProject } from '../services/vaultService';
 import { config } from '../config';
 import { cache } from '../lib/cache';
 import Decimal from 'decimal.js';
+import { EligibilityService } from '../services/eligibilityService';
 
 /**
  * User Vesting API Controller
@@ -18,6 +21,7 @@ export class UserVestingController {
   private connection: Connection;
   private streamflowService: StreamflowService;
   private priceService: PriceService;
+  private eligibilityService: EligibilityService;
   private lastBlockhash: { hash: string; timestamp: number } | null = null;
 
   constructor() {
@@ -26,6 +30,7 @@ export class UserVestingController {
     this.connection = new Connection(config.rpcEndpoint, 'confirmed');
     this.streamflowService = new StreamflowService();
     this.priceService = new PriceService(this.connection, 'mainnet-beta');
+    this.eligibilityService = new EligibilityService();
   }
 
   /**
@@ -66,13 +71,13 @@ export class UserVestingController {
           console.warn(`⚠️ Vesting ${v.id} has no associated pool (orphaned record)`);
           return false;
         }
-        
+
         // Skip if pool is cancelled
         if (v.vesting_streams.state === 'cancelled') {
           console.log(`⚠️ Vesting ${v.id} is in a cancelled pool, skipping`);
           return false;
         }
-        
+
         // Skip if pool hasn't started yet
         const startTime = new Date(v.vesting_streams.start_time);
         return startTime <= now;
@@ -138,7 +143,7 @@ export class UserVestingController {
           const timestamp = messageData.timestamp;
           const now = Date.now();
           const fiveMinutes = 5 * 60 * 1000;
-          
+
           if (!timestamp || Math.abs(now - timestamp) > fiveMinutes) {
             return res.status(401).json({ error: 'Signature expired' });
           }
@@ -177,13 +182,13 @@ export class UserVestingController {
           console.warn(`⚠️ Vesting ${v.id} has no associated pool (orphaned record)`);
           return false;
         }
-        
+
         // Skip if pool is cancelled
         if (v.vesting_streams.state === 'cancelled') {
           console.log(`⚠️ Vesting ${v.id} is in a cancelled pool, skipping`);
           return false;
         }
-        
+
         return true;
       });
 
@@ -206,10 +211,10 @@ export class UserVestingController {
       }
 
       const stream = vesting.vesting_streams;
-      
+
       // Check if pool is paused
       const isPoolPaused = stream.state === 'paused';
-      
+
       if (validVestings.length > 1) {
         console.log(`[SUMMARY] ⚠️ User has ${validVestings.length} active vesting(s), showing pool: ${vesting.vesting_mode} "${stream.name}"`);
         console.log('[SUMMARY] Pools:', validVestings.map((v: any) => ({
@@ -235,11 +240,11 @@ export class UserVestingController {
       const totalAllocation = vesting.token_amount;
       const now = Math.floor(Date.now() / 1000);
       const startTime = stream.start_time ? Math.floor(new Date(stream.start_time).getTime() / 1000) : now;
-      
+
       // Use seconds if available, otherwise fall back to days
       const vestingDurationSeconds = stream.vesting_duration_seconds || (stream.vesting_duration_days * 86400);
       const cliffDurationSeconds = stream.cliff_duration_seconds || (stream.cliff_duration_days * 86400);
-      
+
       const endTime = stream.end_time ? Math.floor(new Date(stream.end_time).getTime() / 1000) : now + vestingDurationSeconds;
       const cliffTime = startTime + cliffDurationSeconds;
 
@@ -363,7 +368,7 @@ export class UserVestingController {
           const timestamp = messageData.timestamp;
           const now = Date.now();
           const fiveMinutes = 5 * 60 * 1000;
-          
+
           if (!timestamp || Math.abs(now - timestamp) > fiveMinutes) {
             return res.status(401).json({ error: 'Signature expired' });
           }
@@ -408,7 +413,7 @@ export class UserVestingController {
       // Format history for frontend (convert from base units to human-readable)
       const TOKEN_DECIMALS = 9;
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
-      
+
       const formattedHistory = historyWithVestings.map((claim: any) => ({
         id: claim.id,
         date: claim.claimed_at,
@@ -445,8 +450,8 @@ export class UserVestingController {
       // Check if claims are globally enabled
       const dbConfig = await this.dbService.getConfig();
       if (dbConfig && dbConfig.enable_claims === false) {
-        return res.status(403).json({ 
-          error: 'Claims are currently disabled by the administrator. Please try again later.' 
+        return res.status(403).json({
+          error: 'Claims are currently disabled by the administrator. Please try again later.'
         });
       }
 
@@ -497,7 +502,7 @@ export class UserVestingController {
         if (stream.streamflow_stream_id) {
           const cacheKey = `streamflow:${stream.streamflow_stream_id}`;
           let streamflowVested = cache.get<number>(cacheKey);
-          
+
           if (streamflowVested === null) {
             try {
               streamflowVested = await this.streamflowService.getVestedAmount(stream.streamflow_stream_id);
@@ -529,7 +534,7 @@ export class UserVestingController {
         // Calculate vested amount using pre-fetched Streamflow data
         let vestedAmount = 0;
         const streamflowVested = streamflowMap.get(vesting.id);
-        
+
         if (streamflowVested !== null && streamflowVested !== undefined) {
           const poolTotal = stream.total_pool_amount;
           const vestedPercentage = streamflowVested / poolTotal;
@@ -566,7 +571,7 @@ export class UserVestingController {
       }
 
       // Determine actual claim amount
-      const actualClaimAmount = amountToClaim 
+      const actualClaimAmount = amountToClaim
         ? Math.min(amountToClaim, roundedTotalAvailable)
         : roundedTotalAvailable;
 
@@ -596,52 +601,99 @@ export class UserVestingController {
       console.log(`[CLAIM] Total available: ${roundedTotalAvailable}, claiming: ${actualClaimAmount}`);
       console.log(`[CLAIM] Pool breakdown:`, poolBreakdown);
 
-      // Get claim fee from config
-      const claimFeeUsd = dbConfig?.claim_fee_usd || 10.0;
+      // Get claim fee from config or project context
+      let feeInLamports: number;
+      let feeWalletPubkey: PublicKey;
+      let claimFeeUsd = 0;
+      let feeInSol = 0;
+      let project = req.project;
 
-      // Get real-time SOL/USD price from Pyth oracle (with 10 second cache)
-      const { PriceService } = await import('../services/priceService');
-      const priceService = new PriceService(this.connection, 'mainnet-beta');
-      
-      let feeInSol: number, solPriceUsd: number;
-      const priceCache = cache.get<{ solAmount: number; solPrice: number }>('solPrice');
-      
-      if (priceCache) {
-        feeInSol = priceCache.solAmount;
-        solPriceUsd = priceCache.solPrice;
-      } else {
-        const priceData = await priceService.calculateSolFee(claimFeeUsd);
-        feeInSol = priceData.solAmount;
-        solPriceUsd = priceData.solPrice;
-        cache.set('solPrice', { solAmount: feeInSol, solPrice: solPriceUsd }, 10);
-      }
-      const feeInLamports = Math.floor(feeInSol * LAMPORTS_PER_SOL);
-      
-      console.log(`[CLAIM] Fee: $${claimFeeUsd} USD = ${feeInSol.toFixed(4)} SOL (SOL price: $${solPriceUsd.toFixed(2)})`);
+      // If project context is missing, try to derive it from the vestings
+      if (!project && validVestings.length > 0) {
+        console.log('[CLAIM] No project context in request, attempting to derive from vestings...');
+        console.log('[CLAIM] First vesting data:', {
+          id: validVestings[0].id,
+          project_id: validVestings[0].project_id,
+          stream_id: validVestings[0].vesting_stream_id,
+          stream_project_id: validVestings[0].vesting_streams?.project_id
+        });
 
-      // Parse treasury keypair
-      let treasuryKeypair: Keypair;
-      try {
-        if (config.treasuryPrivateKey.startsWith('[')) {
-          const secretKey = Uint8Array.from(JSON.parse(config.treasuryPrivateKey));
-          treasuryKeypair = Keypair.fromSecretKey(secretKey);
+        const projectId = validVestings[0].project_id || validVestings[0].vesting_streams?.project_id;
+        
+        if (projectId) {
+          console.log(`[CLAIM] Found project ID: ${projectId}, fetching project details...`);
+          const { data: derivedProject, error: projectError } = await this.dbService.supabase
+            .from('projects')
+            .select('*')
+            .eq('id', projectId)
+            .single();
+
+          if (projectError) {
+            console.error('[CLAIM] Error fetching project:', projectError);
+          } else if (derivedProject) {
+            console.log(`[CLAIM] Derived project context: ${derivedProject.name} (${derivedProject.id})`);
+            project = derivedProject;
+          }
         } else {
-          try {
-            const bs58 = await import('bs58');
-            const decoded = bs58.default.decode(config.treasuryPrivateKey);
-            treasuryKeypair = Keypair.fromSecretKey(decoded);
-          } catch {
-            const decoded = Buffer.from(config.treasuryPrivateKey, 'base64');
-            treasuryKeypair = Keypair.fromSecretKey(decoded);
+          // Last resort: get the first active project
+          console.log('[CLAIM] No project_id in vestings, trying to get first active project...');
+          const { data: projects, error: projectsError } = await this.dbService.supabase
+            .from('projects')
+            .select('*')
+            .eq('is_active', true)
+            .limit(1);
+
+          if (projectsError) {
+            console.error('[CLAIM] Error fetching projects:', projectsError);
+          } else if (projects && projects.length > 0) {
+            project = projects[0];
+            console.log(`[CLAIM] Using first active project: ${project.name} (${project.id})`);
           }
         }
-      } catch (err) {
-        console.error('Treasury key parse error:', err);
-        return res.status(500).json({ error: 'Invalid treasury key configuration' });
+      }
+
+      if (project) {
+        console.log(`[CLAIM] Using project: ${project.name} (${project.id})`);
+        
+        // Multi-project mode: Fee is defined in Lamports in the project config
+        feeInLamports = Number(project.claim_fee_lamports || 1000000); // Default 0.001 SOL
+        feeInSol = feeInLamports / LAMPORTS_PER_SOL;
+
+        // Use project fee recipient or fallback to vault
+        if (project.fee_recipient_address) {
+          feeWalletPubkey = new PublicKey(project.fee_recipient_address);
+          console.log(`[CLAIM] Using project fee recipient: ${project.fee_recipient_address}`);
+        } else if (project.vault_public_key) {
+          feeWalletPubkey = new PublicKey(project.vault_public_key);
+          console.log(`[CLAIM] Using project vault as fee recipient: ${project.vault_public_key}`);
+        } else {
+          // Fallback: use the globally configured fee wallet
+          feeWalletPubkey = config.feeWallet || new PublicKey('11111111111111111111111111111111');
+          console.warn(`[CLAIM] No fee recipient or vault configured, using fallback: ${feeWalletPubkey.toBase58()}`);
+        }
+      } else {
+        // No project context found - this should not happen in normal operation
+        console.error('[CLAIM] ❌ FAILED: No project context available after all attempts');
+        console.error('[CLAIM] Vestings data:', validVestings.map((v: any) => ({
+          id: v.id,
+          project_id: v.project_id,
+          stream_project_id: v.vesting_streams?.project_id,
+          stream_id: v.vesting_stream_id,
+          pool_name: v.vesting_streams?.name
+        })));
+
+        return res.status(500).json({
+          error: 'Unable to determine project context for claim. Please contact support.',
+          details: 'The system could not identify which project vault to use for this claim.',
+          debug: {
+            vestingsCount: validVestings.length,
+            hasProjectId: !!validVestings[0]?.project_id,
+            hasStreamProjectId: !!validVestings[0]?.vesting_streams?.project_id
+          }
+        });
       }
 
       const userPublicKey = new PublicKey(userWallet);
-      const feeWalletPubkey = treasuryKeypair.publicKey;
 
       // Skip balance check - user will get error from Solana if insufficient SOL
       // This saves 1 RPC call per claim request
@@ -652,7 +704,7 @@ export class UserVestingController {
       // Use cached blockhash if available (5 second TTL)
       let blockhash: string;
       const now_ms = Date.now();
-      
+
       if (this.lastBlockhash && (now_ms - this.lastBlockhash.timestamp) < 5000) {
         blockhash = this.lastBlockhash.hash;
       } else {
@@ -676,7 +728,7 @@ export class UserVestingController {
       // Create a VersionedTransaction with empty signatures for the frontend to sign
       const versionedTx = new VersionedTransaction(message);
       const serializedFeeTx = Buffer.from(versionedTx.serialize()).toString('base64');
-      
+
       // Clear blockhash cache after use to ensure fresh blockhash for transaction
       this.lastBlockhash = null;
 
@@ -744,7 +796,7 @@ export class UserVestingController {
 
       // Calculate total claim amount from breakdown
       const totalClaimAmount = poolBreakdown.reduce((sum: number, p: any) => sum + p.amountToClaim, 0);
-      
+
       console.log(`[COMPLETE-CLAIM] Total claim amount: ${totalClaimAmount} tokens`);
       console.log(`[COMPLETE-CLAIM] Pool breakdown:`, poolBreakdown);
 
@@ -752,37 +804,90 @@ export class UserVestingController {
         return res.status(400).json({ error: 'Invalid claim amount' });
       }
 
-      // Parse treasury keypair
-      let treasuryKeypair: Keypair;
-      try {
-        if (config.treasuryPrivateKey.startsWith('[')) {
-          const secretKey = Uint8Array.from(JSON.parse(config.treasuryPrivateKey));
-          treasuryKeypair = Keypair.fromSecretKey(secretKey);
-        } else {
-          try {
-            const bs58 = await import('bs58');
-            const decoded = bs58.default.decode(config.treasuryPrivateKey);
-            treasuryKeypair = Keypair.fromSecretKey(decoded);
-          } catch {
-            const decoded = Buffer.from(config.treasuryPrivateKey, 'base64');
-            treasuryKeypair = Keypair.fromSecretKey(decoded);
+      // Determine Vault Signer and Token Mint
+      let vaultKeypair: Keypair;
+      let tokenMint: PublicKey;
+      let project = req.project;
+
+      // If project context is missing, try to derive it from the pool breakdown
+      if (!project && poolBreakdown.length > 0) {
+        console.log('[COMPLETE-CLAIM] No project context in request, attempting to derive...');
+        
+        // Get the first vesting ID from breakdown
+        const firstVestingId = poolBreakdown[0].vestingId;
+        if (firstVestingId) {
+          const { data: vesting, error: vestingError } = await this.dbService.supabase
+            .from('vestings')
+            .select('project_id, vesting_streams(project_id)')
+            .eq('id', firstVestingId)
+            .single();
+
+          if (vestingError) {
+            console.error('[COMPLETE-CLAIM] Error fetching vesting:', vestingError);
+          }
+
+          const projectId = vesting?.project_id || vesting?.vesting_streams?.project_id;
+
+          if (projectId) {
+            console.log(`[COMPLETE-CLAIM] Found project ID: ${projectId}, fetching project...`);
+            const { data: derivedProject, error: projectError } = await this.dbService.supabase
+              .from('projects')
+              .select('*')
+              .eq('id', projectId)
+              .single();
+
+            if (projectError) {
+              console.error('[COMPLETE-CLAIM] Error fetching project:', projectError);
+            } else if (derivedProject) {
+              console.log(`[COMPLETE-CLAIM] Derived project context: ${derivedProject.name} (${derivedProject.id})`);
+              project = derivedProject;
+            }
+          } else {
+            // Last resort: get first active project
+            console.log('[COMPLETE-CLAIM] No project_id found, trying first active project...');
+            const { data: projects, error: projectsError } = await this.dbService.supabase
+              .from('projects')
+              .select('*')
+              .eq('is_active', true)
+              .limit(1);
+
+            if (projectsError) {
+              console.error('[COMPLETE-CLAIM] Error fetching projects:', projectsError);
+            } else if (projects && projects.length > 0) {
+              project = projects[0];
+              console.log(`[COMPLETE-CLAIM] Using first active project: ${project.name} (${project.id})`);
+            }
           }
         }
-      } catch (err) {
-        console.error('Treasury key parse error:', err);
-        return res.status(500).json({ error: 'Invalid treasury key configuration' });
       }
 
-      // Transfer tokens from treasury to user
-      console.log('[COMPLETE-CLAIM] Transferring tokens from treasury to user...');
-      
+      if (project) {
+        try {
+          vaultKeypair = await getVaultKeypairForProject(project.id);
+          tokenMint = new PublicKey(project.mint_address);
+        } catch (err) {
+          console.error('Failed to get project vault:', err);
+          return res.status(500).json({ error: 'Failed to access project vault' });
+        }
+      } else {
+        // No project context found - this should not happen in normal operation
+        console.error('[COMPLETE-CLAIM] No project context available. Pool breakdown:', poolBreakdown);
+
+        return res.status(500).json({
+          error: 'Unable to determine project context for claim completion. Please contact support.',
+          details: 'The system could not identify which project vault to use for this claim.'
+        });
+      }
+
+      // Transfer tokens from vault/treasury to user
+      console.log('[COMPLETE-CLAIM] Transferring tokens from vault to user...');
+
       const TOKEN_DECIMALS = 9;
-      const tokenMint = new PublicKey(config.customTokenMint!);
       const userPublicKey = new PublicKey(userWallet);
 
-      const treasuryTokenAccount = await getAssociatedTokenAddress(
+      const vaultTokenAccount = await getAssociatedTokenAddress(
         tokenMint,
-        treasuryKeypair.publicKey
+        vaultKeypair.publicKey
       );
 
       const userTokenAccount = await getAssociatedTokenAddress(
@@ -806,26 +911,26 @@ export class UserVestingController {
       console.log(`[COMPLETE-CLAIM] Transferring ${totalClaimAmount} tokens (${amountInBaseUnits} base units)`);
 
       const tokenTransferTx = new Transaction();
-      
+
       // Add create account instruction if needed
       if (!userTokenAccountExists) {
         console.log('[COMPLETE-CLAIM] Adding create token account instruction');
         tokenTransferTx.add(
           createAssociatedTokenAccountInstruction(
-            treasuryKeypair.publicKey,
+            vaultKeypair.publicKey,
             userTokenAccount,
             userPublicKey,
             tokenMint
           )
         );
       }
-      
+
       // Add transfer instruction
       tokenTransferTx.add(
         createTransferInstruction(
-          treasuryTokenAccount,
+          vaultTokenAccount,
           userTokenAccount,
-          treasuryKeypair.publicKey,
+          vaultKeypair.publicKey,
           amountInBaseUnits
         )
       );
@@ -833,37 +938,37 @@ export class UserVestingController {
       // Send transaction - use Solana's built-in retry instead of manual retry
       // This prevents duplicate transactions
       let tokenSignature: string | null = null;
-      
+
       try {
         console.log(`[COMPLETE-CLAIM] Sending transaction...`);
-        
+
         // Get blockhash
         const { blockhash } = await this.connection.getLatestBlockhash();
         tokenTransferTx.recentBlockhash = blockhash;
-        
+
         // Send with Solana's built-in retry (maxRetries: 3)
         // This retries the SAME transaction, not creating new ones
-        tokenSignature = await this.connection.sendTransaction(tokenTransferTx, [treasuryKeypair], {
+        tokenSignature = await this.connection.sendTransaction(tokenTransferTx, [vaultKeypair], {
           skipPreflight: true,
           maxRetries: 3, // Let Solana handle retries
         });
-        
+
         console.log(`[COMPLETE-CLAIM] Transaction sent: ${tokenSignature}, confirming...`);
-        
+
         // Wait for confirmation with 30 second timeout
         try {
           await Promise.race([
             this.connection.confirmTransaction(tokenSignature, 'confirmed'),
-            new Promise((_, reject) => 
+            new Promise((_, reject) =>
               setTimeout(() => reject(new Error('Transaction confirmation timeout')), 30000)
             )
           ]);
-          
+
           console.log('[COMPLETE-CLAIM] Transfer confirmed! Signature:', tokenSignature);
         } catch (confirmError) {
           // Timeout occurred - check transaction status
           console.warn(`[COMPLETE-CLAIM] Confirmation timeout, checking transaction status: ${tokenSignature}`);
-          
+
           try {
             const status = await this.connection.getSignatureStatus(tokenSignature);
             if (status && status.value && !status.value.err) {
@@ -886,7 +991,7 @@ export class UserVestingController {
             throw statusError;
           }
         }
-        
+
       } catch (err) {
         const lastError = err instanceof Error ? err : new Error('Unknown transaction error');
         console.error(`[COMPLETE-CLAIM] Transaction failed:`, lastError.message);
@@ -898,29 +1003,36 @@ export class UserVestingController {
       }
 
       // Get fee amount
-      const dbConfig = await this.dbService.getConfig();
-      const claimFeeUsd = dbConfig?.claim_fee_usd || 10.0;
-      
-      const { PriceService } = await import('../services/priceService');
-      const priceService = new PriceService(this.connection, 'mainnet-beta');
-      const { solAmount: feeInSol } = await priceService.calculateSolFee(claimFeeUsd);
+      let feeInSol = 0;
+
+      if (req.project) {
+        feeInSol = Number(req.project.claim_fee_lamports || 1000000) / LAMPORTS_PER_SOL;
+      } else {
+        const dbConfig = await this.dbService.getConfig();
+        const claimFeeUsd = dbConfig?.claim_fee_usd || 10.0;
+
+        const { PriceService } = await import('../services/priceService');
+        const priceService = new PriceService(this.connection, 'mainnet-beta');
+        const { solAmount } = await priceService.calculateSolFee(claimFeeUsd);
+        feeInSol = solAmount;
+      }
 
       // Record claims in database for each pool
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
-      
+
       for (const poolItem of poolBreakdown) {
         if (poolItem.amountToClaim > 0) {
           // Use Decimal.js for precise conversion
           const amountInBaseUnits = Number(this.toBaseUnits(poolItem.amountToClaim, TOKEN_DECIMALS));
-          
+
           // Skip if amount rounds to 0 (too small to record)
           if (amountInBaseUnits === 0) {
             console.log(`[COMPLETE-CLAIM] Skipping pool ${poolItem.poolName}: amount too small (${poolItem.amountToClaim} tokens)`);
             continue;
           }
-          
+
           const proportionalFee = (poolItem.amountToClaim / totalClaimAmount) * feeInSol;
-          
+
           await this.dbService.createClaim({
             user_wallet: userWallet,
             vesting_id: poolItem.vestingId,
@@ -928,7 +1040,7 @@ export class UserVestingController {
             fee_paid: proportionalFee,
             transaction_signature: tokenSignature,
           });
-          
+
           console.log(`[COMPLETE-CLAIM] Recorded claim for pool ${poolItem.poolName}: ${poolItem.amountToClaim} tokens (${amountInBaseUnits} base units)`);
         }
       }
@@ -1045,12 +1157,12 @@ export class UserVestingController {
             // Check cache first (30 second TTL)
             const cacheKey = `streamflow:${stream.streamflow_stream_id}`;
             let streamflowVested = cache.get<number>(cacheKey);
-            
+
             if (streamflowVested === null) {
               streamflowVested = await this.streamflowService.getVestedAmount(stream.streamflow_stream_id);
               cache.set(cacheKey, streamflowVested, 30);
             }
-            
+
             const poolTotal = stream.total_pool_amount;
             const vestedPercentage = streamflowVested / poolTotal;
             vestedAmount = totalAllocation * vestedPercentage;
@@ -1119,12 +1231,12 @@ export class UserVestingController {
             // Check cache first (30 second TTL)
             const cacheKey = `streamflow:${stream.streamflow_stream_id}`;
             let streamflowVested = cache.get<number>(cacheKey);
-            
+
             if (streamflowVested === null) {
               streamflowVested = await this.streamflowService.getVestedAmount(stream.streamflow_stream_id);
               cache.set(cacheKey, streamflowVested, 30);
             }
-            
+
             const poolTotal = stream.total_pool_amount;
             const vestedPercentage = streamflowVested / poolTotal;
             vestedAmount = totalAllocation * vestedPercentage;
@@ -1209,7 +1321,7 @@ export class UserVestingController {
       // Minimum claim amount: 0.001 tokens (1,000,000 base units)
       const MIN_CLAIM_AMOUNT = 0.001;
       if (amountToClaim < MIN_CLAIM_AMOUNT) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: `Minimum claim amount is ${MIN_CLAIM_AMOUNT} tokens. You requested ${amountToClaim} tokens.`,
           minimumAmount: MIN_CLAIM_AMOUNT,
           requestedAmount: amountToClaim
@@ -1272,12 +1384,12 @@ export class UserVestingController {
             // Check cache first (30 second TTL)
             const cacheKey = `streamflow:${stream.streamflow_stream_id}`;
             let streamflowVested = cache.get<number>(cacheKey);
-            
+
             if (streamflowVested === null) {
               streamflowVested = await this.streamflowService.getVestedAmount(stream.streamflow_stream_id);
               cache.set(cacheKey, streamflowVested, 30);
             }
-            
+
             const poolTotal = stream.total_pool_amount;
             const vestedPercentage = streamflowVested / poolTotal;
             vestedAmount = totalAllocation * vestedPercentage;
@@ -1338,37 +1450,73 @@ export class UserVestingController {
         }
       }
 
-      // Parse treasury keypair (using environment config, not database config)
-      let treasuryKeypair: Keypair;
-      try {
-        if (!config.treasuryPrivateKey) {
-          throw new Error('Treasury private key not configured');
-        }
-        if (config.treasuryPrivateKey.startsWith('[')) {
-          const secretKey = Uint8Array.from(JSON.parse(config.treasuryPrivateKey));
-          treasuryKeypair = Keypair.fromSecretKey(secretKey);
-        } else {
-          try {
-            const bs58 = await import('bs58');
-            const decoded = bs58.default.decode(config.treasuryPrivateKey);
-            treasuryKeypair = Keypair.fromSecretKey(decoded);
-          } catch {
-            const decoded = Buffer.from(config.treasuryPrivateKey, 'base64');
-            treasuryKeypair = Keypair.fromSecretKey(decoded);
+      // Determine Vault Signer, Token Mint, and Fee
+      let vaultKeypair: Keypair;
+      let tokenMint: PublicKey;
+      let feeInSOL = 0;
+      let feeWallet: PublicKey | null = null;
+
+      if (req.project) {
+        try {
+          vaultKeypair = await getVaultKeypairForProject(req.project.id);
+          tokenMint = new PublicKey(req.project.mint_address);
+
+          const feeInLamports = Number(req.project.claim_fee_lamports || 1000000);
+          feeInSOL = feeInLamports / LAMPORTS_PER_SOL;
+
+          if (req.project.fee_recipient_address) {
+            feeWallet = new PublicKey(req.project.fee_recipient_address);
+          } else {
+            // Fallback to vault public key if no fee recipient specified
+            feeWallet = vaultKeypair.publicKey;
           }
+        } catch (err) {
+          console.error('Failed to get project vault:', err);
+          return res.status(500).json({ error: 'Failed to access project vault' });
         }
-      } catch (err) {
-        console.error('Treasury key parse error:', err);
-        return res.status(500).json({ error: 'Invalid treasury key configuration' });
+      } else {
+        // Legacy: Parse treasury keypair
+        try {
+          if (!config.treasuryPrivateKey) {
+            throw new Error('Treasury private key not configured');
+          }
+          if (config.treasuryPrivateKey.startsWith('[')) {
+            const secretKey = Uint8Array.from(JSON.parse(config.treasuryPrivateKey));
+            vaultKeypair = Keypair.fromSecretKey(secretKey);
+          } else {
+            try {
+              const bs58 = await import('bs58');
+              const decoded = bs58.default.decode(config.treasuryPrivateKey);
+              vaultKeypair = Keypair.fromSecretKey(decoded);
+            } catch {
+              const decoded = Buffer.from(config.treasuryPrivateKey, 'base64');
+              vaultKeypair = Keypair.fromSecretKey(decoded);
+            }
+          }
+          tokenMint = new PublicKey(config.customTokenMint!);
+
+          // Calculate legacy fee
+          if (claimFeeUSD > 0 && dbConfig?.fee_wallet) {
+            try {
+              const { solAmount } = await this.priceService.calculateSolFee(claimFeeUSD);
+              feeInSOL = solAmount;
+              feeWallet = new PublicKey(dbConfig.fee_wallet);
+            } catch (err) {
+              console.warn('Failed to calculate legacy fee:', err);
+            }
+          }
+        } catch (err) {
+          console.error('Treasury key parse error:', err);
+          return res.status(500).json({ error: 'Invalid treasury key configuration' });
+        }
       }
 
       // Create token transfer transaction
-      const tokenMint = new PublicKey(config.customTokenMint!);
       const userPublicKey = new PublicKey(userWallet);
 
-      const treasuryTokenAccount = await getAssociatedTokenAddress(
+      const vaultTokenAccount = await getAssociatedTokenAddress(
         tokenMint,
-        treasuryKeypair.publicKey
+        vaultKeypair.publicKey
       );
 
       const userTokenAccount = await getAssociatedTokenAddress(
@@ -1391,7 +1539,7 @@ export class UserVestingController {
       if (!userTokenAccountExists) {
         tokenTransferTx.add(
           createAssociatedTokenAccountInstruction(
-            treasuryKeypair.publicKey,
+            vaultKeypair.publicKey,
             userTokenAccount,
             userPublicKey,
             tokenMint
@@ -1406,37 +1554,25 @@ export class UserVestingController {
 
       tokenTransferTx.add(
         createTransferInstruction(
-          treasuryTokenAccount,
+          vaultTokenAccount,
           userTokenAccount,
-          treasuryKeypair.publicKey,
+          vaultKeypair.publicKey,
           amountInBaseUnits
         )
       );
 
       // Add SOL fee transfer if fee is set and fee wallet is configured
-      if (claimFeeUSD > 0 && dbConfig?.fee_wallet) {
-        try {
-          const feeWallet = new PublicKey(dbConfig.fee_wallet);
-          const userPublicKeyObj = new PublicKey(userWallet);
-          
-          // Convert USD fee to SOL using real-time price from Pyth oracle
-          const { solAmount: feeInSOL } = await this.priceService.calculateSolFee(claimFeeUSD);
-          const feeInLamports = Math.floor(feeInSOL * LAMPORTS_PER_SOL);
-          
-          if (feeInLamports > 0) {
-            // Add SOL transfer from user to fee wallet
-            tokenTransferTx.add(
-              SystemProgram.transfer({
-                fromPubkey: userPublicKeyObj,
-                toPubkey: feeWallet,
-                lamports: feeInLamports,
-              })
-            );
-            console.log(`[CLAIM-ALL] Added SOL fee transfer: ${feeInSOL} SOL from user to fee wallet`);
-          }
-        } catch (feeErr) {
-          console.warn('[CLAIM-ALL] Could not add SOL fee transfer:', feeErr);
-          // Don't fail the entire transaction if fee transfer fails
+      if (feeInSOL > 0 && feeWallet) {
+        const feeInLamports = Math.floor(feeInSOL * LAMPORTS_PER_SOL);
+        if (feeInLamports > 0) {
+          tokenTransferTx.add(
+            SystemProgram.transfer({
+              fromPubkey: userPublicKey,
+              toPubkey: feeWallet,
+              lamports: feeInLamports,
+            })
+          );
+          console.log(`[CLAIM-ALL] Added SOL fee transfer: ${feeInSOL} SOL from user to fee wallet`);
         }
       }
 
@@ -1457,7 +1593,7 @@ export class UserVestingController {
 
         // Send with Solana's built-in retry (maxRetries: 3)
         // This retries the SAME transaction, not creating new ones
-        tokenSignature = await this.connection.sendTransaction(tokenTransferTx, [treasuryKeypair], {
+        tokenSignature = await this.connection.sendTransaction(tokenTransferTx, [vaultKeypair], {
           skipPreflight: true,
           maxRetries: 3, // Let Solana handle retries
         });
@@ -1480,11 +1616,11 @@ export class UserVestingController {
               setTimeout(() => reject(new Error('Transaction confirmation timeout')), 30000)
             ),
           ]);
-          
+
           console.log('[CLAIM-ALL] Transfer confirmed successfully! Signature:', tokenSignature);
         } catch (confirmError) {
           console.warn(`[CLAIM-ALL] Confirmation timed out, checking transaction status: ${tokenSignature}`);
-          
+
           // Check if transaction was actually successful despite timeout
           try {
             const status = await this.connection.getSignatureStatus(tokenSignature);
@@ -1520,22 +1656,22 @@ export class UserVestingController {
       // Record claims in database for each pool that had an amount claimed
       // Distribute fee proportionally across pools based on claim amount
       const totalClaimAmount = poolBreakdown.reduce((sum, p) => sum + p.amountToClaim, 0);
-      
+
       for (const poolBreakdownItem of poolBreakdown) {
         const poolData = poolsWithAvailable.find(p => p.vesting.vesting_stream_id === poolBreakdownItem.poolId);
         if (poolData && poolBreakdownItem.amountToClaim > 0) {
           // Use Decimal.js for precise conversion
           const amountInBaseUnits = Number(this.toBaseUnits(poolBreakdownItem.amountToClaim, TOKEN_DECIMALS));
-          
+
           // Skip if amount rounds to 0 (too small to record)
           if (amountInBaseUnits === 0) {
             console.log(`[CLAIM-ALL] Skipping pool ${poolBreakdownItem.poolId}: amount too small (${poolBreakdownItem.amountToClaim} tokens)`);
             continue;
           }
-          
+
           // Calculate proportional fee for this pool
           const proportionalFee = (poolBreakdownItem.amountToClaim / totalClaimAmount) * claimFeeUSD;
-          
+
           await this.dbService.createClaim({
             user_wallet: userWallet,
             vesting_id: poolData.vesting.id,
@@ -1543,7 +1679,7 @@ export class UserVestingController {
             fee_paid: proportionalFee,
             transaction_signature: tokenSignature,
           });
-          
+
           console.log(`[CLAIM-ALL] Recorded claim for pool ${poolBreakdownItem.poolId}: ${poolBreakdownItem.amountToClaim} tokens (${amountInBaseUnits} base units)`);
         }
       }
@@ -1585,7 +1721,7 @@ export class UserVestingController {
       // Minimum claim amount: 0.001 tokens (1,000,000 base units)
       const MIN_CLAIM_AMOUNT = 0.001;
       if (amountToClaim < MIN_CLAIM_AMOUNT) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: `Minimum claim amount is ${MIN_CLAIM_AMOUNT} tokens. You requested ${amountToClaim} tokens.`,
           minimumAmount: MIN_CLAIM_AMOUNT,
           requestedAmount: amountToClaim
@@ -1648,12 +1784,12 @@ export class UserVestingController {
             // Check cache first (30 second TTL)
             const cacheKey = `streamflow:${stream.streamflow_stream_id}`;
             let streamflowVested = cache.get<number>(cacheKey);
-            
+
             if (streamflowVested === null) {
               streamflowVested = await this.streamflowService.getVestedAmount(stream.streamflow_stream_id);
               cache.set(cacheKey, streamflowVested, 30);
             }
-            
+
             const poolTotal = stream.total_pool_amount;
             const vestedPercentage = streamflowVested / poolTotal;
             vestedAmount = totalAllocation * vestedPercentage;
@@ -1714,37 +1850,72 @@ export class UserVestingController {
         }
       }
 
-      // Parse treasury keypair (using environment config, not database config)
-      let treasuryKeypair: Keypair;
-      try {
-        if (!config.treasuryPrivateKey) {
-          throw new Error('Treasury private key not configured');
-        }
-        if (config.treasuryPrivateKey.startsWith('[')) {
-          const secretKey = Uint8Array.from(JSON.parse(config.treasuryPrivateKey));
-          treasuryKeypair = Keypair.fromSecretKey(secretKey);
-        } else {
-          try {
-            const bs58 = await import('bs58');
-            const decoded = bs58.default.decode(config.treasuryPrivateKey);
-            treasuryKeypair = Keypair.fromSecretKey(decoded);
-          } catch {
-            const decoded = Buffer.from(config.treasuryPrivateKey, 'base64');
-            treasuryKeypair = Keypair.fromSecretKey(decoded);
+      // Determine Vault Signer, Token Mint, and Fee
+      let vaultKeypair: Keypair;
+      let tokenMint: PublicKey;
+      let feeInSOL = 0;
+      let feeWallet: PublicKey | null = null;
+
+      if (req.project) {
+        try {
+          vaultKeypair = await getVaultKeypairForProject(req.project.id);
+          tokenMint = new PublicKey(req.project.mint_address);
+
+          const feeInLamports = Number(req.project.claim_fee_lamports || 1000000);
+          feeInSOL = feeInLamports / LAMPORTS_PER_SOL;
+
+          if (req.project.fee_recipient_address) {
+            feeWallet = new PublicKey(req.project.fee_recipient_address);
+          } else {
+            feeWallet = vaultKeypair.publicKey;
           }
+        } catch (err) {
+          console.error('Failed to get project vault:', err);
+          return res.status(500).json({ error: 'Failed to access project vault' });
         }
-      } catch (err) {
-        console.error('Treasury key parse error:', err);
-        return res.status(500).json({ error: 'Invalid treasury key configuration' });
+      } else {
+        // Legacy: Parse treasury keypair
+        try {
+          if (!config.treasuryPrivateKey) {
+            throw new Error('Treasury private key not configured');
+          }
+          if (config.treasuryPrivateKey.startsWith('[')) {
+            const secretKey = Uint8Array.from(JSON.parse(config.treasuryPrivateKey));
+            vaultKeypair = Keypair.fromSecretKey(secretKey);
+          } else {
+            try {
+              const bs58 = await import('bs58');
+              const decoded = bs58.default.decode(config.treasuryPrivateKey);
+              vaultKeypair = Keypair.fromSecretKey(decoded);
+            } catch {
+              const decoded = Buffer.from(config.treasuryPrivateKey, 'base64');
+              vaultKeypair = Keypair.fromSecretKey(decoded);
+            }
+          }
+          tokenMint = new PublicKey(config.customTokenMint!);
+
+          // Calculate legacy fee
+          if (claimFeeUSD > 0 && dbConfig?.fee_wallet) {
+            try {
+              const { solAmount } = await this.priceService.calculateSolFee(claimFeeUSD);
+              feeInSOL = solAmount;
+              feeWallet = new PublicKey(dbConfig.fee_wallet);
+            } catch (err) {
+              console.warn('Failed to calculate legacy fee:', err);
+            }
+          }
+        } catch (err) {
+          console.error('Treasury key parse error:', err);
+          return res.status(500).json({ error: 'Invalid treasury key configuration' });
+        }
       }
 
       // Create token transfer transaction
-      const tokenMint = new PublicKey(config.customTokenMint!);
       const userPublicKey = new PublicKey(userWallet);
 
-      const treasuryTokenAccount = await getAssociatedTokenAddress(
+      const vaultTokenAccount = await getAssociatedTokenAddress(
         tokenMint,
-        treasuryKeypair.publicKey
+        vaultKeypair.publicKey
       );
 
       const userTokenAccount = await getAssociatedTokenAddress(
@@ -1767,7 +1938,7 @@ export class UserVestingController {
       if (!userTokenAccountExists) {
         tokenTransferTx.add(
           createAssociatedTokenAccountInstruction(
-            treasuryKeypair.publicKey,
+            vaultKeypair.publicKey,
             userTokenAccount,
             userPublicKey,
             tokenMint
@@ -1782,30 +1953,23 @@ export class UserVestingController {
 
       tokenTransferTx.add(
         createTransferInstruction(
-          treasuryTokenAccount,
+          vaultTokenAccount,
           userTokenAccount,
-          treasuryKeypair.publicKey,
+          vaultKeypair.publicKey,
           amountInBaseUnits
         )
       );
 
       // Add SOL fee transfer if fee is set and fee wallet is configured
-      let feeInSOL = 0;
-      if (claimFeeUSD > 0 && dbConfig?.fee_wallet) {
+      if (feeInSOL > 0 && feeWallet) {
         try {
-          const feeWallet = new PublicKey(dbConfig.fee_wallet);
-          const userPublicKeyObj = new PublicKey(userWallet);
-          
-          // Convert USD fee to SOL using real-time price from Pyth oracle
-          const feeData = await this.priceService.calculateSolFee(claimFeeUSD);
-          feeInSOL = feeData.solAmount;
           const feeInLamports = Math.floor(feeInSOL * LAMPORTS_PER_SOL);
-          
+
           if (feeInLamports > 0) {
             // Add SOL transfer from user to fee wallet
             tokenTransferTx.add(
               SystemProgram.transfer({
-                fromPubkey: userPublicKeyObj,
+                fromPubkey: userPublicKey,
                 toPubkey: feeWallet,
                 lamports: feeInLamports,
               })
@@ -1823,8 +1987,8 @@ export class UserVestingController {
       // User pays network fees (tiny ~0.00001 SOL) + claim fee
       tokenTransferTx.feePayer = userPublicKey;
 
-      // Partially sign with treasury (for token transfer authority)
-      tokenTransferTx.partialSign(treasuryKeypair);
+      // Partially sign with vault (for token transfer authority)
+      tokenTransferTx.partialSign(vaultKeypair);
 
       // Convert transaction to base64 for transmission
       const transactionBuffer = tokenTransferTx.serialize({
@@ -1857,7 +2021,7 @@ export class UserVestingController {
    */
   async submitSignedClaim(req: Request, res: Response) {
     try {
-      const { userWallet, transactionBase64, poolBreakdown, amountToClaim, claimFeeUSD } = req.body;
+      const { userWallet, transactionBase64, poolBreakdown, amountToClaim, claimFeeUSD, feeInSOL } = req.body;
 
       if (!userWallet || !transactionBase64) {
         return res.status(400).json({ error: 'userWallet and transactionBase64 are required' });
@@ -1901,12 +2065,12 @@ export class UserVestingController {
                 setTimeout(() => reject(new Error('Transaction confirmation timeout')), 30000)
               ),
             ]);
-            
+
             console.log('[SUBMIT-CLAIM] Transfer confirmed successfully! Signature:', tokenSignature);
             break;
           } catch (confirmError) {
             console.warn(`[SUBMIT-CLAIM] Confirmation timed out, checking transaction status: ${tokenSignature}`);
-            
+
             // Check if transaction was actually successful despite timeout
             try {
               const status = await this.connection.getSignatureStatus(tokenSignature);
@@ -1941,15 +2105,17 @@ export class UserVestingController {
       // Record claims in database for each pool that had an amount claimed
       const TOKEN_DECIMALS = 9;
       const totalClaimAmount = poolBreakdown.reduce((sum: number, p: any) => sum + p.amountToClaim, 0);
-      
+
       try {
         for (const poolBreakdownItem of poolBreakdown) {
           if (poolBreakdownItem.amountToClaim > 0) {
             // Use Decimal.js for precise conversion
             const amountInBaseUnits = Number(this.toBaseUnits(poolBreakdownItem.amountToClaim, TOKEN_DECIMALS));
             // Calculate proportional fee for this pool
-            const proportionalFee = (poolBreakdownItem.amountToClaim / totalClaimAmount) * (claimFeeUSD || 0);
-            
+            // Prefer feeInSOL (native) over claimFeeUSD (legacy/display)
+            const totalFee = feeInSOL !== undefined ? feeInSOL : (claimFeeUSD || 0);
+            const proportionalFee = (poolBreakdownItem.amountToClaim / totalClaimAmount) * totalFee;
+
             // Ensure amount is positive before recording
             if (amountInBaseUnits > 0) {
               // Get vesting ID from poolBreakdownItem (need to fetch from DB)

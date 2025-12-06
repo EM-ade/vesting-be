@@ -11,9 +11,12 @@ import { MetricsController } from './metricsController';
 import { SnapshotController } from './snapshotController';
 import { StreamController } from './streamController';
 import { TreasuryController } from './treasuryController';
+import { ProjectController } from './projectController';
+import { CreateProjectController } from './createProjectController';
 import { requireAdmin } from '../middleware/adminAuth';
 import { claimRateLimiter } from '../middleware/rateLimiter';
 import { deduplicationMiddleware } from '../middleware/deduplication';
+import { validate, schemas } from '../middleware/validation';
 
 const router = Router();
 const poolController = new PoolController();
@@ -27,10 +30,19 @@ const metricsController = new MetricsController();
 const snapshotController = new SnapshotController();
 const streamController = new StreamController();
 const treasuryController = new TreasuryController();
+const projectController = new ProjectController();
+const createProjectController = new CreateProjectController();
+
+// Project routes
+router.get('/projects', projectController.listProjects.bind(projectController));
+router.get('/projects/:id', projectController.getProjectDetails.bind(projectController));
+router.put('/projects/:id', requireAdmin, projectController.updateProject.bind(projectController));
+router.post('/projects', createProjectController.createProject.bind(createProjectController));
 
 // Pool routes
-router.post('/pools', poolController.createPool.bind(poolController));
-router.post('/pools/validate', poolController.validatePool.bind(poolController));
+router.post('/pools', validate(schemas.createPool), poolController.createPool.bind(poolController));
+router.post('/pools/validate', validate(schemas.createPool), poolController.validatePool.bind(poolController));
+router.put('/pools/:id', poolController.updatePool.bind(poolController));
 router.put('/pools/:id/allocations', poolController.updateAllocations.bind(poolController));
 router.put('/pools/:id/rules/:ruleId', poolController.updatePoolRule.bind(poolController));
 router.get('/pools', poolController.listPools.bind(poolController));
@@ -40,7 +52,10 @@ router.get('/pools/:id/users/:wallet', poolController.getUserStatus.bind(poolCon
 router.get('/pools/:id/streamflow-status', poolController.getStreamflowStatus.bind(poolController));
 router.post('/pools/:id/rules', poolController.addRule.bind(poolController));
 router.post('/pools/:id/sync', poolController.syncPool.bind(poolController));
-router.delete('/pools/:id', poolController.cancelPool.bind(poolController));
+router.delete('/pools/:id', poolController.deletePool.bind(poolController));
+router.patch('/pools/:id/cancel', poolController.cancelPool.bind(poolController));
+router.put('/pools/:id/details', poolController.updatePoolDetails.bind(poolController));
+router.post('/pools/:id/snapshot', poolController.triggerSnapshot.bind(poolController));
 router.post('/pools/:id/deploy-streamflow', poolController.deployToStreamflow.bind(poolController));
 router.post('/pools/:id/cancel-streamflow', poolController.cancelStreamflowPool.bind(poolController));
 router.post('/pools/:id/topup', poolController.topupPool.bind(poolController));
@@ -60,7 +75,7 @@ router.get('/user/vesting/claim-history', userVestingController.getClaimHistory.
 router.get('/user/vesting/claim-status/:signature', userVestingController.getClaimStatus.bind(userVestingController));
 
 // Claim routes with rate limiting and deduplication
-router.post('/user/vesting/claim', claimRateLimiter, deduplicationMiddleware, userVestingController.claimVesting.bind(userVestingController));
+router.post('/user/vesting/claim', claimRateLimiter, deduplicationMiddleware, validate(schemas.claimVesting), userVestingController.claimVesting.bind(userVestingController));
 router.post('/user/vesting/complete-claim', claimRateLimiter, deduplicationMiddleware, userVestingController.completeClaimWithFee.bind(userVestingController));
 
 // Admin logs routes
@@ -84,6 +99,7 @@ router.get('/metrics/dashboard', metricsController.getDashboardMetrics.bind(metr
 router.get('/metrics/pool-balance', metricsController.getPoolBalanceEndpoint.bind(metricsController));
 router.get('/metrics/eligible-wallets', metricsController.getEligibleWalletsEndpoint.bind(metricsController));
 router.get('/metrics/activity-log', metricsController.getActivityLog.bind(metricsController));
+router.get('/metrics/claim-history-stats', metricsController.getClaimHistoryStats.bind(metricsController));
 
 // Snapshot routes
 router.get('/snapshot/holders', snapshotController.getHolders.bind(snapshotController));
@@ -101,6 +117,8 @@ router.post('/stream/resume-all', streamController.resumeAllStreams.bind(streamC
 // Treasury routes
 router.get('/treasury/status', treasuryController.getTreasuryStatus.bind(treasuryController));
 router.get('/treasury/pools', treasuryController.getPoolBreakdown.bind(treasuryController));
+router.get('/treasury/available', treasuryController.getAvailableBalance.bind(treasuryController));
+router.post('/treasury/withdraw', treasuryController.withdrawTokens.bind(treasuryController));
 
 // Admin routes (admin dashboard handles authentication)
 router.get('/admin/pool/:poolId/members', adminController.getPoolMembers.bind(adminController));

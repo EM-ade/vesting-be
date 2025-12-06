@@ -138,11 +138,11 @@ export class StreamController {
    */
   async emergencyStopAllStreams(req: Request, res: Response) {
     try {
-      const { adminWallet, signature, message, adminPrivateKey } = req.body;
+      const { adminWallet, signature, message } = req.body;
 
-      if (!adminWallet || !signature || !message || !adminPrivateKey) {
+      if (!adminWallet || !signature || !message) {
         return res.status(400).json({
-          error: 'adminWallet, signature, message, and adminPrivateKey are required',
+          error: 'adminWallet, signature, and message are required',
         });
       }
 
@@ -181,14 +181,6 @@ export class StreamController {
         return res.status(401).json({ error: 'Signature verification failed' });
       }
 
-      // Parse admin keypair
-      let adminKeypair: Keypair;
-      try {
-        adminKeypair = Keypair.fromSecretKey(Buffer.from(adminPrivateKey, 'base64'));
-      } catch (err) {
-        return res.status(400).json({ error: 'Invalid admin private key format' });
-      }
-
       // Get all active streams from database
       const { data: streams, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
@@ -217,7 +209,7 @@ export class StreamController {
         try {
           // Update all vesting records for this stream
           await this.dbService.supabase
-            .from('vesting')
+            .from('vestings')
             .update({
               is_active: false,
               is_cancelled: true,
