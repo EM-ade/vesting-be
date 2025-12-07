@@ -2,7 +2,7 @@
   "name": "vesting-system",
   "version": "1.0.0",
   "description": "Custom token vesting with NFT-based eligibility",
-  "main": "index.js",
+  "main": "dist/api/server.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/api/server.js",
