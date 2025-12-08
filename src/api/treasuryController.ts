@@ -573,4 +573,114 @@ export class TreasuryController {
       });
     }
   }
+
+  /**
+   * POST /api/treasury/withdraw-sol
+   * Withdraw SOL from treasury vault (for gas fees)
+   */
+  async withdrawSol(req: Request, res: Response) {
+    try {
+      const projectId = req.projectId || req.query.projectId as string || req.body.projectId;
+      const { amount, recipientAddress, note } = req.body;
+
+      if (!projectId) {
+        return res.status(400).json({ 
+          error: 'Project ID required',
+          hint: 'Pass projectId in query params, request body, or ensure project context is set'
+        });
+      }
+
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: 'Valid amount required (in SOL)' });
+      }
+
+      if (!recipientAddress) {
+        return res.status(400).json({ error: 'Recipient address required' });
+      }
+
+      const { getVaultKeypairForProject } = await import('../services/vaultService');
+      const { Transaction, SystemProgram, sendAndConfirmTransaction, LAMPORTS_PER_SOL } = await import('@solana/web3.js');
+
+      // Get vault keypair
+      const vaultKeypair = await getVaultKeypairForProject(projectId);
+      const recipientPubkey = new PublicKey(recipientAddress);
+
+      // Check vault SOL balance
+      const vaultBalance = await this.connection.getBalance(vaultKeypair.publicKey);
+      const vaultBalanceInSol = vaultBalance / LAMPORTS_PER_SOL;
+
+      // Convert amount from SOL to lamports
+      const amountInLamports = Math.floor(amount * LAMPORTS_PER_SOL);
+
+      // Reserve some SOL for rent exemption (0.002 SOL minimum)
+      const minRentReserve = 0.002 * LAMPORTS_PER_SOL;
+      const availableBalance = vaultBalance - minRentReserve;
+
+      if (amountInLamports > availableBalance) {
+        return res.status(400).json({
+          error: 'Insufficient SOL balance',
+          vaultBalance: vaultBalanceInSol,
+          available: availableBalance / LAMPORTS_PER_SOL,
+          requested: amount,
+          hint: 'Some SOL must be kept for rent exemption'
+        });
+      }
+
+      // Create transfer transaction
+      const transaction = new Transaction().add(
+        SystemProgram.transfer({
+          fromPubkey: vaultKeypair.publicKey,
+          toPubkey: recipientPubkey,
+          lamports: amountInLamports,
+        })
+      );
+
+      // Send transaction
+      const signature = await sendAndConfirmTransaction(
+        this.connection,
+        transaction,
+        [vaultKeypair],
+        { commitment: 'confirmed' }
+      );
+
+      console.log(`✅ SOL withdrawal successful: ${signature}`);
+      console.log(`   Amount: ${amount} SOL`);
+      console.log(`   From: ${vaultKeypair.publicKey.toBase58()}`);
+      console.log(`   To: ${recipientAddress}`);
+      if (note) console.log(`   Note: ${note}`);
+
+      // Log action to admin_actions table
+      try {
+        await this.dbService.supabase.from('admin_actions').insert({
+          project_id: projectId,
+          action_type: 'sol_withdrawal',
+          description: `Withdrew ${amount} SOL to ${recipientAddress}${note ? `: ${note}` : ''}`,
+          metadata: {
+            amount,
+            recipientAddress,
+            signature,
+            note,
+            vaultAddress: vaultKeypair.publicKey.toBase58(),
+          },
+        });
+      } catch (logError) {
+        console.warn('Failed to log withdrawal action:', logError);
+      }
+
+      res.json({
+        success: true,
+        signature,
+        amount,
+        recipient: recipientAddress,
+        vaultBalanceBefore: vaultBalanceInSol,
+        vaultBalanceAfter: (vaultBalance - amountInLamports) / LAMPORTS_PER_SOL,
+      });
+
+    } catch (error) {
+      console.error('SOL withdrawal failed:', error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : 'SOL withdrawal failed',
+      });
+    }
+  }
 }

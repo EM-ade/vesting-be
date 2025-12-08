@@ -119,6 +119,7 @@ router.get('/treasury/status', treasuryController.getTreasuryStatus.bind(treasur
 router.get('/treasury/pools', treasuryController.getPoolBreakdown.bind(treasuryController));
 router.get('/treasury/available', treasuryController.getAvailableBalance.bind(treasuryController));
 router.post('/treasury/withdraw', treasuryController.withdrawTokens.bind(treasuryController));
+router.post('/treasury/withdraw-sol', treasuryController.withdrawSol.bind(treasuryController));
 
 // Admin routes (admin dashboard handles authentication)
 router.get('/admin/pool/:poolId/members', adminController.getPoolMembers.bind(adminController));
