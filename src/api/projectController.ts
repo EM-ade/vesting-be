@@ -9,6 +9,7 @@ export class ProjectController {
    * GET /api/projects
    * List projects accessible to the connected wallet
    * Requires wallet parameter to filter by user access
+   * OPTIMIZED: Uses single JOIN query instead of two sequential queries
    */
   async listProjects(req: Request, res: Response) {
     try {
@@ -17,14 +18,28 @@ export class ProjectController {
       
       // If wallet provided, filter by user access
       if (walletAddress) {
-        // Get projects where user has access
-        const { data: accessRecords, error: accessError } = await supabase
+        // OPTIMIZED: Single query with JOIN to get projects user has access to
+        const { data: accessRecords, error } = await supabase
           .from('user_project_access')
-          .select('project_id')
-          .eq('wallet_address', walletAddress);
+          .select(`
+            project_id,
+            role,
+            projects!inner (
+              id,
+              name,
+              symbol,
+              mint_address,
+              logo_url,
+              is_active
+            )
+          `)
+          .eq('wallet_address', walletAddress)
+          .eq('projects.is_active', true)
+          .order('projects.name', { foreignTable: 'projects' });
 
-        if (accessError) {
-          throw accessError;
+        if (error) {
+          console.error('Failed to fetch user projects:', error);
+          throw error;
         }
 
         if (!accessRecords || accessRecords.length === 0) {
@@ -32,21 +47,12 @@ export class ProjectController {
           return res.json([]);
         }
 
-        const projectIds = accessRecords.map(record => record.project_id);
+        // Extract and format project data
+        const projects = accessRecords
+          .map((record: any) => record.projects)
+          .filter(Boolean); // Remove any null projects
 
-        // Get project details for accessible projects
-        const { data: projects, error } = await supabase
-          .from('projects')
-          .select('id, name, symbol, mint_address, logo_url, is_active')
-          .in('id', projectIds)
-          .eq('is_active', true)
-          .order('name');
-
-        if (error) {
-          throw error;
-        }
-
-        return res.json(projects || []);
+        return res.json(projects);
       }
       
       // No wallet provided - return empty array (require authentication)
