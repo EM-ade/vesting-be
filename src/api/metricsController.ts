@@ -93,17 +93,20 @@ export class MetricsController {
   /**
    * GET /api/metrics/eligible-wallets
    * Get count of eligible wallets
+   * SECURITY: Filters by project
    */
   async getEligibleWalletsEndpoint(req: Request, res: Response) {
     try {
-      const cacheKey = 'eligible_wallets_endpoint';
+      const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
+      const cacheKey = `eligible_wallets_endpoint_${projectId || 'all'}`;
       const cachedData = this.cache.get(cacheKey);
 
       if (cachedData) {
         return res.json(cachedData);
       }
 
-      const count = await this.getEligibleWalletsCount();
+      // SECURITY: Count eligible wallets for this project only
+      const count = await this.getEligibleWalletsCount(projectId);
 
       const responseData = {
         count,
