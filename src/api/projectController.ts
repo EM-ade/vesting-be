@@ -7,25 +7,50 @@ export class ProjectController {
   
   /**
    * GET /api/projects
-   * List all available projects
-   * Public endpoint
+   * List projects accessible to the connected wallet
+   * Requires wallet parameter to filter by user access
    */
   async listProjects(req: Request, res: Response) {
     try {
       const supabase = getSupabaseClient();
+      const walletAddress = req.query.wallet as string;
       
-      // TODO: Should this be public? For now yes, to allow project selection.
-      const { data: projects, error } = await supabase
-        .from('projects')
-        .select('id, name, symbol, mint_address, logo_url, is_active')
-        .eq('is_active', true)
-        .order('name');
+      // If wallet provided, filter by user access
+      if (walletAddress) {
+        // Get projects where user has access
+        const { data: accessRecords, error: accessError } = await supabase
+          .from('user_project_access')
+          .select('project_id')
+          .eq('wallet_address', walletAddress);
 
-      if (error) {
-        throw error;
+        if (accessError) {
+          throw accessError;
+        }
+
+        if (!accessRecords || accessRecords.length === 0) {
+          // User has no projects yet
+          return res.json([]);
+        }
+
+        const projectIds = accessRecords.map(record => record.project_id);
+
+        // Get project details for accessible projects
+        const { data: projects, error } = await supabase
+          .from('projects')
+          .select('id, name, symbol, mint_address, logo_url, is_active')
+          .in('id', projectIds)
+          .eq('is_active', true)
+          .order('name');
+
+        if (error) {
+          throw error;
+        }
+
+        return res.json(projects || []);
       }
-
-      res.json(projects || []);
+      
+      // No wallet provided - return empty array (require authentication)
+      res.json([]);
     } catch (error) {
       console.error('Failed to list projects:', error);
       res.status(500).json({ error: 'Failed to list projects' });
@@ -35,6 +60,8 @@ export class ProjectController {
   /**
    * GET /api/projects/:id
    * Get project details and refresh live balance
+   * SECURITY: Public endpoint - anyone can view project details
+   * This is intentional as projects are public information
    */
   async getProjectDetails(req: Request, res: Response) {
     try {
@@ -42,6 +69,7 @@ export class ProjectController {
       const supabase = getSupabaseClient();
       const connection = getConnection();
       
+      // Get project details (public information)
       const { data: project, error } = await supabase
         .from('projects')
         .select('id, name, symbol, mint_address, logo_url, description, website_url, is_active, claim_fee_lamports, vault_public_key, vault_balance_sol, vault_balance_token')
@@ -87,12 +115,18 @@ export class ProjectController {
   /**
    * PUT /api/projects/:id
    * Update project details (e.g. mint address)
+   * SECURITY: Should verify user has access to this project
+   * Note: This endpoint should be protected by adminAuth middleware
    */
   async updateProject(req: Request, res: Response) {
     try {
       const { id } = req.params;
       const { mint_address, logo_url, description, website_url } = req.body;
       const supabase = getSupabaseClient();
+      
+      // SECURITY NOTE: This endpoint should be protected by requireAdmin middleware
+      // which verifies the user has owner/admin role for this project
+      // The middleware should have already checked access before this runs
 
       const updates: any = {};
       if (mint_address !== undefined) updates.mint_address = mint_address;
@@ -100,6 +134,7 @@ export class ProjectController {
       if (description !== undefined) updates.description = description;
       if (website_url !== undefined) updates.website_url = website_url;
 
+      // Update project (middleware should have already verified access)
       const { data: project, error } = await supabase
         .from('projects')
         .update(updates)

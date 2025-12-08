@@ -27,24 +27,19 @@ export class MetricsController {
    */
   async getDashboardMetrics(req: Request, res: Response) {
     try {
-      const cacheKey = 'dashboard_metrics';
+      const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
+      const cacheKey = `dashboard_metrics_${projectId || 'all'}`;
       const cachedData = this.cache.get(cacheKey);
 
       if (cachedData) {
         return res.json(cachedData);
       }
 
-      // Get pool balance (from Supabase or blockchain)
-      const poolBalance = await this.getPoolBalance();
-
-      // Get eligible wallets count
-      const eligibleWallets = await this.getEligibleWalletsCount();
-
-      // Get next unlock time
+      // SECURITY: Get metrics for this project only
+      const poolBalance = await this.getPoolBalance(projectId);
+      const eligibleWallets = await this.getEligibleWalletsCount(projectId);
       const nextUnlock = await this.getNextUnlockTime();
-
-      // Get cycle window
-      const cycleWindow = await this.getCycleWindow();
+      const cycleWindow = await this.getCycleWindow(projectId);
 
       const responseData = {
         poolBalance,
@@ -128,22 +123,31 @@ export class MetricsController {
   /**
    * GET /api/metrics/activity-log
    * Get recent operational events
+   * SECURITY: Filters by project
    */
   async getActivityLog(req: Request, res: Response) {
     try {
       const { limit = 20 } = req.query;
-      const cacheKey = `activity_log_${limit}`;
+      const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
+      const cacheKey = `activity_log_${limit}_${projectId || 'all'}`;
       const cachedData = this.cache.get(cacheKey);
 
       if (cachedData) {
         return res.json(cachedData);
       }
 
-      const { data, error } = await this.dbService.supabase
+      let query = this.dbService.supabase
         .from('admin_actions')
         .select('*')
         .order('created_at', { ascending: false })
         .limit(Number(limit));
+
+      // SECURITY: Filter by project if provided
+      if (projectId) {
+        query = query.eq('project_id', projectId);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
 
@@ -165,10 +169,12 @@ export class MetricsController {
   /**
    * GET /api/metrics/claim-history-stats
    * Get aggregated claim history for charts (last 30 days)
+   * SECURITY: Filters by project
    */
   async getClaimHistoryStats(req: Request, res: Response) {
     try {
-      const cacheKey = 'claim_history_stats';
+      const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
+      const cacheKey = `claim_history_stats_${projectId || 'all'}`;
       const cachedData = this.cache.get(cacheKey);
 
       if (cachedData) {
@@ -178,11 +184,18 @@ export class MetricsController {
       // Get claims from last 30 days
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
       
-      const { data, error } = await this.dbService.supabase
+      let query = this.dbService.supabase
         .from('claim_history')
         .select('amount_claimed, claimed_at')
         .gte('claimed_at', thirtyDaysAgo)
         .order('claimed_at', { ascending: true });
+
+      // SECURITY: Filter by project if provided
+      if (projectId) {
+        query = query.eq('project_id', projectId);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
 
@@ -226,14 +239,21 @@ export class MetricsController {
 
   /**
    * Helper: Get pool balance from database or blockchain
+   * SECURITY: Should filter by project, but requires project context
    */
-  private async getPoolBalance(): Promise<number> {
+  private async getPoolBalance(projectId?: string): Promise<number> {
     try {
-      // Get total pool amount from all active vesting streams
-      const { data: streams } = await this.dbService.supabase
+      // SECURITY: Get total pool amount from active vesting streams for this project
+      let query = this.dbService.supabase
         .from('vesting_streams')
         .select('total_pool_amount')
         .eq('is_active', true);
+
+      if (projectId) {
+        query = query.eq('project_id', projectId);
+      }
+
+      const { data: streams } = await query;
 
       if (streams && streams.length > 0) {
         return streams.reduce((sum: number, s: any) => sum + (s.total_pool_amount || 0), 0);
@@ -248,15 +268,22 @@ export class MetricsController {
 
   /**
    * Helper: Get eligible wallets count
+   * SECURITY: Should filter by project
    */
-  private async getEligibleWalletsCount(): Promise<number> {
+  private async getEligibleWalletsCount(projectId?: string): Promise<number> {
     try {
-      // Count active vesting records (each represents an eligible wallet)
-      const { count } = await this.dbService.supabase
+      // SECURITY: Count active vesting records for this project
+      let query = this.dbService.supabase
         .from('vestings')
         .select('*', { count: 'exact', head: true })
         .eq('is_active', true)
         .eq('is_cancelled', false);
+
+      if (projectId) {
+        query = query.eq('project_id', projectId);
+      }
+
+      const { count } = await query;
 
       return count || 0;
     } catch (error) {
@@ -281,16 +308,23 @@ export class MetricsController {
 
   /**
    * Helper: Get cycle window
+   * SECURITY: Should filter by project
    */
-  private async getCycleWindow(): Promise<{ start: string; end: string; daysRemaining: number }> {
+  private async getCycleWindow(projectId?: string): Promise<{ start: string; end: string; daysRemaining: number }> {
     try {
-      // Get the earliest start time and latest end time from active streams
-      const { data: streams } = await this.dbService.supabase
+      // SECURITY: Get the earliest start time and latest end time from active streams for this project
+      let query = this.dbService.supabase
         .from('vesting_streams')
         .select('start_time, end_time')
         .eq('is_active', true)
         .order('start_time', { ascending: true })
         .limit(1);
+
+      if (projectId) {
+        query = query.eq('project_id', projectId);
+      }
+
+      const { data: streams } = await query;
 
       if (!streams || streams.length === 0) {
         return {

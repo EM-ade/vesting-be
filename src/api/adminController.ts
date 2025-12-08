@@ -17,13 +17,31 @@ export class AdminController {
   /**
    * GET /api/admin/pool/:poolId/members
    * Get all members in a vesting pool with their allocations and NFT counts
+   * SECURITY: Verifies pool belongs to user's project
    */
   async getPoolMembers(req: Request, res: Response) {
     try {
       const { poolId } = req.params;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
       if (!poolId) {
         return res.status(400).json({ error: 'Pool ID is required' });
+      }
+
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // SECURITY: First verify the pool belongs to user's project
+      const { data: pool, error: poolError } = await this.dbService.supabase
+        .from('vesting_streams')
+        .select('id')
+        .eq('id', poolId)
+        .eq('project_id', projectId)
+        .single();
+
+      if (poolError || !pool) {
+        return res.status(404).json({ error: 'Pool not found or access denied' });
       }
 
       // Get all active vestings for this pool (exclude cancelled members)
@@ -31,6 +49,7 @@ export class AdminController {
         .from('vestings')
         .select('id, user_wallet, token_amount, nft_count, tier, created_at, is_active, is_cancelled')
         .eq('vesting_stream_id', poolId)
+        .eq('project_id', projectId)
         .eq('is_cancelled', false);
 
       if (error) {
@@ -53,18 +72,36 @@ export class AdminController {
   /**
    * PATCH /api/admin/pool/:poolId/member/:wallet
    * Update or remove a member from a vesting pool
+   * SECURITY: Verifies pool belongs to user's project
    */
   async updatePoolMember(req: Request, res: Response) {
     try {
       const { poolId, wallet } = req.params;
       const { allocation, nftCount, remove } = req.body;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
       if (!poolId || !wallet) {
         return res.status(400).json({ error: 'Pool ID and wallet are required' });
       }
 
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // SECURITY: First verify the pool belongs to user's project
+      const { data: pool, error: poolError } = await this.dbService.supabase
+        .from('vesting_streams')
+        .select('id')
+        .eq('id', poolId)
+        .eq('project_id', projectId)
+        .single();
+
+      if (poolError || !pool) {
+        return res.status(404).json({ error: 'Pool not found or access denied' });
+      }
+
       if (remove) {
-        // Remove member from pool
+        // SECURITY: Remove member from pool - verify project ownership
         const { error } = await this.dbService.supabase
           .from('vestings')
           .update({ 
@@ -73,7 +110,8 @@ export class AdminController {
             cancellation_reason: 'Removed by admin'
           })
           .eq('vesting_stream_id', poolId)
-          .eq('user_wallet', wallet);
+          .eq('user_wallet', wallet)
+          .eq('project_id', projectId);
 
         if (error) {
           throw new Error(`Failed to remove member: ${error.message}`);
@@ -93,11 +131,13 @@ export class AdminController {
           return res.status(400).json({ error: 'Either allocation or nftCount must be provided' });
         }
 
+        // SECURITY: Update member - verify project ownership
         const { error } = await this.dbService.supabase
           .from('vestings')
           .update(updates)
           .eq('vesting_stream_id', poolId)
-          .eq('user_wallet', wallet);
+          .eq('user_wallet', wallet)
+          .eq('project_id', projectId);
 
         if (error) {
           throw new Error(`Failed to update member: ${error.message}`);
@@ -120,18 +160,36 @@ export class AdminController {
   /**
    * PATCH /api/admin/pool/:poolId/state
    * Pause, resume, or cancel a vesting pool
+   * SECURITY: Verifies pool belongs to user's project
    */
   async updatePoolState(req: Request, res: Response) {
     try {
       const { poolId } = req.params;
       const { action, reason } = req.body;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
       if (!poolId) {
         return res.status(400).json({ error: 'Pool ID is required' });
       }
 
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
       if (!action || !['pause', 'resume', 'cancel'].includes(action)) {
         return res.status(400).json({ error: 'Valid action (pause, resume, cancel) is required' });
+      }
+
+      // SECURITY: First verify the pool belongs to user's project
+      const { data: pool, error: poolError } = await this.dbService.supabase
+        .from('vesting_streams')
+        .select('id')
+        .eq('id', poolId)
+        .eq('project_id', projectId)
+        .single();
+
+      if (poolError || !pool) {
+        return res.status(404).json({ error: 'Pool not found or access denied' });
       }
 
       // Update pool state using SupabaseService method
@@ -158,6 +216,7 @@ export class AdminController {
 
       // If cancelling, also cancel all vestings in this pool
       if (action === 'cancel') {
+        // SECURITY: Cancel vestings - verify project ownership
         await this.dbService.supabase
           .from('vestings')
           .update({ 
@@ -165,7 +224,8 @@ export class AdminController {
             is_cancelled: true,
             cancellation_reason: reason || 'Pool cancelled by admin'
           })
-          .eq('vesting_stream_id', poolId);
+          .eq('vesting_stream_id', poolId)
+          .eq('project_id', projectId);
       }
 
       res.json({
