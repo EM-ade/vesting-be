@@ -18,28 +18,15 @@ export class ProjectController {
       
       // If wallet provided, filter by user access
       if (walletAddress) {
-        // OPTIMIZED: Single query with JOIN to get projects user has access to
-        const { data: accessRecords, error } = await supabase
+        // Get projects where user has access (use two queries for now - JOIN syntax might vary by Supabase version)
+        const { data: accessRecords, error: accessError } = await supabase
           .from('user_project_access')
-          .select(`
-            project_id,
-            role,
-            projects!inner (
-              id,
-              name,
-              symbol,
-              mint_address,
-              logo_url,
-              is_active
-            )
-          `)
-          .eq('wallet_address', walletAddress)
-          .eq('projects.is_active', true)
-          .order('projects.name', { foreignTable: 'projects' });
+          .select('project_id')
+          .eq('wallet_address', walletAddress);
 
-        if (error) {
-          console.error('Failed to fetch user projects:', error);
-          throw error;
+        if (accessError) {
+          console.error('Failed to fetch user access records:', accessError);
+          throw accessError;
         }
 
         if (!accessRecords || accessRecords.length === 0) {
@@ -47,12 +34,22 @@ export class ProjectController {
           return res.json([]);
         }
 
-        // Extract and format project data
-        const projects = accessRecords
-          .map((record: any) => record.projects)
-          .filter(Boolean); // Remove any null projects
+        const projectIds = accessRecords.map(record => record.project_id);
 
-        return res.json(projects);
+        // Get project details for accessible projects
+        const { data: projects, error: projectsError } = await supabase
+          .from('projects')
+          .select('id, name, symbol, mint_address, logo_url, is_active')
+          .in('id', projectIds)
+          .eq('is_active', true)
+          .order('name');
+
+        if (projectsError) {
+          console.error('Failed to fetch projects:', projectsError);
+          throw projectsError;
+        }
+
+        return res.json(projects || []);
       }
       
       // No wallet provided - return empty array (require authentication)
