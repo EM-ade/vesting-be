@@ -623,17 +623,18 @@ export class TreasuryController {
       // Convert amount from SOL to lamports
       const amountInLamports = Math.floor(amount * LAMPORTS_PER_SOL);
 
-      // Reserve some SOL for rent exemption (0.002 SOL minimum)
-      const minRentReserve = 0.002 * LAMPORTS_PER_SOL;
+      // Reserve SOL for rent exemption (0.00089088 SOL minimum for account rent exemption)
+      // Keeping 0.001 SOL to be safe
+      const minRentReserve = 0.001 * LAMPORTS_PER_SOL;
       const availableBalance = vaultBalance - minRentReserve;
 
       if (amountInLamports > availableBalance) {
         return res.status(400).json({
           error: 'Insufficient SOL balance',
           vaultBalance: vaultBalanceInSol,
-          available: availableBalance / LAMPORTS_PER_SOL,
+          available: Math.max(0, availableBalance / LAMPORTS_PER_SOL),
           requested: amount,
-          hint: 'Some SOL must be kept for rent exemption'
+          hint: 'Account must maintain minimum 0.001 SOL for rent exemption (Solana requirement)'
         });
       }
 
