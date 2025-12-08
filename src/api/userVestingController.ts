@@ -40,18 +40,25 @@ export class UserVestingController {
   async listUserVestings(req: Request, res: Response) {
     try {
       const { wallet } = req.query;
+      const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
 
       if (!wallet || typeof wallet !== 'string') {
         return res.status(400).json({ error: 'wallet parameter is required' });
       }
 
-      // Get ALL active vesting records for this wallet
-      const { data: vestings, error: vestingError } = await this.dbService.supabase
+      // SECURITY: Get active vesting records for this wallet in this project only
+      let query = this.dbService.supabase
         .from('vestings')
         .select('*, vesting_streams(*)')
         .eq('user_wallet', wallet)
-        .eq('is_active', true)
-        .order('created_at', { ascending: false });
+        .eq('is_active', true);
+
+      // Filter by project if projectId is provided (multi-project mode)
+      if (projectId) {
+        query = query.eq('project_id', projectId);
+      }
+
+      const { data: vestings, error: vestingError } = await query.order('created_at', { ascending: false });
 
       if (vestingError) {
         console.error('Supabase error fetching vestings:', vestingError);
@@ -115,6 +122,7 @@ export class UserVestingController {
   async getVestingSummary(req: Request, res: Response) {
     try {
       const { wallet, signature, message, poolId } = req.query;
+      const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
 
       if (!wallet || typeof wallet !== 'string') {
         return res.status(400).json({ error: 'wallet parameter is required' });
@@ -159,13 +167,19 @@ export class UserVestingController {
         return res.status(400).json({ error: 'Invalid wallet address' });
       }
 
-      // Get ALL active vesting records for this wallet
-      const { data: vestings, error: vestingError } = await this.dbService.supabase
+      // SECURITY: Get active vesting records for this wallet in this project only
+      let vestingQuery = this.dbService.supabase
         .from('vestings')
         .select('*, vesting_streams(*)')
         .eq('user_wallet', wallet)
-        .eq('is_active', true)
-        .order('created_at', { ascending: false });
+        .eq('is_active', true);
+
+      // Filter by project if projectId is provided (multi-project mode)
+      if (projectId) {
+        vestingQuery = vestingQuery.eq('project_id', projectId);
+      }
+
+      const { data: vestings, error: vestingError } = await vestingQuery.order('created_at', { ascending: false });
 
       if (vestingError) {
         throw vestingError;
@@ -340,6 +354,7 @@ export class UserVestingController {
   async getClaimHistory(req: Request, res: Response) {
     try {
       const { wallet, signature, message } = req.query;
+      const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
 
       if (!wallet || typeof wallet !== 'string') {
         return res.status(400).json({ error: 'wallet parameter is required' });
@@ -377,8 +392,8 @@ export class UserVestingController {
         }
       }
 
-      // Get claim history from database with vesting information
-      const { data: historyWithVestings, error: historyError } = await this.dbService.supabase
+      // SECURITY: Get claim history from database with vesting information - filter by project
+      let historyQuery = this.dbService.supabase
         .from('claim_history')
         .select(`
           *,
@@ -390,8 +405,14 @@ export class UserVestingController {
             vesting_streams (id, name, state)
           )
         `)
-        .eq('user_wallet', wallet)
-        .order('claimed_at', { ascending: false });
+        .eq('user_wallet', wallet);
+
+      // Filter by project if projectId is provided (multi-project mode)
+      if (projectId) {
+        historyQuery = historyQuery.eq('project_id', projectId);
+      }
+
+      const { data: historyWithVestings, error: historyError } = await historyQuery.order('claimed_at', { ascending: false });
 
       if (historyError) {
         console.error('Supabase error fetching claim history:', historyError);

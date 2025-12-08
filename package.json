@@ -4,8 +4,9 @@
   "description": "Custom token vesting with NFT-based eligibility",
   "main": "dist/api/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && echo 'Build completed successfully'",
     "start": "node dist/api/server.js",
+    "postbuild": "node -e \"if (!require('fs').existsSync('dist/api/server.js')) { console.error('ERROR: dist/api/server.js not found after build'); process.exit(1); }\"",
     "dev": "ts-node src/index.ts",
     "sync:daemon": "ts-node src/syncDaemon.ts",
     "sync:daemon:pool": "ts-node src/syncDaemonPool.ts",

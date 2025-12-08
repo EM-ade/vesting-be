@@ -724,32 +724,25 @@ export class PoolController {
   /**
    * GET /api/pools
    * List all vesting pools with Streamflow status
+   * SECURITY: Always filters by project_id to ensure project isolation
    */
   async listPools(req: Request, res: Response) {
     try {
-      // Get all vesting streams from database
-      let query = this.dbService.supabase
-        .from('vesting_streams')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      // IMPORTANT: Remove default projectId filtering if not explicitly provided or if global admin
-      // Currently the frontend doesn't seem to be sending projectId in all cases, or the middleware isn't attaching it correctly for global view.
-      // If you want to list *all* pools for the admin dashboard, you might want to relax this check or ensure the frontend sends the correct ID.
-
-      // Check if req.projectId is valid and not just a placeholder (if any logic sets it)
-      if (req.projectId && req.projectId !== 'undefined' && req.projectId !== 'null') {
-        query = query.eq('project_id', req.projectId);
-      } else {
-        // Fallback: If no project ID is provided, maybe we want to list everything for now to debug?
-        // Or we can check if there's a query param
-        const projectIdParam = req.query.projectId as string;
-        if (projectIdParam) {
-          query = query.eq('project_id', projectIdParam);
-        }
+      // SECURITY: Project ID is REQUIRED for listing pools
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
+      
+      if (!projectId) {
+        return res.status(400).json({ 
+          error: 'Project ID is required. Please select a project first.' 
+        });
       }
 
-      const { data: streams, error } = await query;
+      // Get all vesting streams for THIS PROJECT ONLY
+      const { data: streams, error } = await this.dbService.supabase
+        .from('vesting_streams')
+        .select('*')
+        .eq('project_id', projectId)
+        .order('created_at', { ascending: false });
 
       if (error) {
         throw new Error(`Failed to fetch pools: ${error.message}`);
@@ -825,24 +818,31 @@ export class PoolController {
   /**
    * GET /api/pools/:id
    * Get pool details
+   * SECURITY: Verifies pool belongs to user's project
    */
   async getPoolDetails(req: Request, res: Response) {
     try {
       const { id } = req.params;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
       if (!id) {
         return res.status(400).json({ error: 'Pool ID is required' });
       }
 
-      // Get pool from database
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // Get pool from database - MUST belong to user's project
       const { data: stream, error } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
         .eq('id', id)
+        .eq('project_id', projectId)
         .single();
 
       if (error || !stream) {
-        return res.status(404).json({ error: 'Pool not found' });
+        return res.status(404).json({ error: 'Pool not found or access denied' });
       }
 
       res.json({
@@ -875,14 +875,20 @@ export class PoolController {
   /**
    * PUT /api/pools/:id
    * Update pool details (name, description)
+   * SECURITY: Verifies pool belongs to user's project
    */
   async updatePool(req: Request, res: Response) {
     try {
       const { id } = req.params;
       const { name, description } = req.body;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
       if (!id) {
         return res.status(400).json({ error: 'Pool ID is required' });
+      }
+
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
       }
 
       const updates: any = {};
@@ -893,10 +899,12 @@ export class PoolController {
         return res.status(400).json({ error: 'No fields to update' });
       }
 
+      // SECURITY: Update only if pool belongs to user's project
       const { data: pool, error } = await this.dbService.supabase
         .from('vesting_streams')
         .update(updates)
         .eq('id', id)
+        .eq('project_id', projectId)
         .select()
         .single();
 
@@ -924,16 +932,22 @@ export class PoolController {
     try {
       const { id } = req.params;
       const { ruleId, name, nftContract, threshold, allocationType, allocationValue } = req.body;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
       if (!id || !ruleId) {
         return res.status(400).json({ error: 'Pool ID and rule ID are required' });
       }
 
-      // Get current pool
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // SECURITY: Get current pool - must belong to user's project
       const { data: pool, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('nft_requirements')
         .eq('id', id)
+        .eq('project_id', projectId)
         .single();
 
       if (fetchError || !pool) {
@@ -958,11 +972,12 @@ export class PoolController {
         allocationValue,
       };
 
-      // Update pool
+      // SECURITY: Update pool - verify project ownership again
       const { error: updateError } = await this.dbService.supabase
         .from('vesting_streams')
         .update({ nft_requirements: nftRequirements })
-        .eq('id', id);
+        .eq('id', id)
+        .eq('project_id', projectId);
 
       if (updateError) {
         throw new Error(`Failed to update rule: ${updateError.message}`);
@@ -989,17 +1004,22 @@ export class PoolController {
     try {
       const { id } = req.params;
       const { allocations } = req.body;
-      const projectId = req.projectId || req.project?.id;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
       if (!id || !allocations || !Array.isArray(allocations)) {
         return res.status(400).json({ error: 'Pool ID and allocations array are required' });
       }
 
-      // Get pool details
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // SECURITY: Get pool details - must belong to user's project
       const { data: pool, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
         .eq('id', id)
+        .eq('project_id', projectId)
         .single();
 
       if (fetchError || !pool) {
@@ -1044,11 +1064,12 @@ export class PoolController {
         });
       }
 
-      // Delete existing vestings for this pool
+      // SECURITY: Delete existing vestings for this pool (verify project ownership)
       const { error: deleteError } = await this.dbService.supabase
         .from('vestings')
         .delete()
-        .eq('vesting_stream_id', id);
+        .eq('vesting_stream_id', id)
+        .eq('project_id', projectId);
 
       if (deleteError) {
         throw new Error(`Failed to delete old allocations: ${deleteError.message}`);
@@ -1247,12 +1268,18 @@ export class PoolController {
   async cancelPool(req: Request, res: Response) {
     try {
       const { id } = req.params;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
-      // Get pool details
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // SECURITY: Get pool details - must belong to user's project
       const { data: pool, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
         .eq('id', id)
+        .eq('project_id', projectId)
         .single();
 
       if (fetchError || !pool) {
@@ -1265,6 +1292,7 @@ export class PoolController {
           .from('vestings')
           .select('id')
           .eq('vesting_stream_id', id)
+          .eq('project_id', projectId)
           .eq('snapshot_locked', true);
 
         if (vestings && vestings.length > 0) {
@@ -1295,7 +1323,7 @@ export class PoolController {
         }
       }
 
-      // Deactivate pool in database - explicitly update state
+      // SECURITY: Deactivate pool in database - verify project ownership
       const { data: updatedPool, error: updateError } = await this.dbService.supabase
         .from('vesting_streams')
         .update({
@@ -1303,6 +1331,7 @@ export class PoolController {
           state: 'cancelled'
         })
         .eq('id', id)
+        .eq('project_id', projectId)
         .select()
         .single();
 
@@ -1597,12 +1626,18 @@ export class PoolController {
   async deletePool(req: Request, res: Response) {
     try {
       const { id } = req.params;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
 
-      // Get pool details
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // SECURITY: Get pool details - must belong to user's project
       const { data: pool, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
         .eq('id', id)
+        .eq('project_id', projectId)
         .single();
 
       if (fetchError || !pool) {
@@ -1625,11 +1660,12 @@ export class PoolController {
         console.log(`Allowing deletion of paused pool: ${pool.name}`);
       }
 
-      // Delete pool (cascade will delete vestings)
+      // SECURITY: Delete pool (cascade will delete vestings) - verify project ownership
       const { error: deleteError } = await this.dbService.supabase
         .from('vesting_streams')
         .delete()
-        .eq('id', id);
+        .eq('id', id)
+        .eq('project_id', projectId);
 
       if (deleteError) {
         throw new Error(`Failed to delete pool: ${deleteError.message}`);
