@@ -33,12 +33,15 @@ export class TreasuryController {
       // Check for project context first
       const projectId = req.projectId || req.query.projectId as string;
 
+      // Store project data for later use
+      let projectData: { vault_public_key: string; mint_address?: string; symbol?: string } | null = null;
+
       if (projectId) {
         // Multi-project mode: Fetch from database
         try {
           const { data: project, error } = await this.dbService.supabase
             .from('projects')
-            .select('vault_public_key, mint_address')
+            .select('vault_public_key, mint_address, symbol')
             .eq('id', projectId)
             .single();
 
@@ -55,6 +58,7 @@ export class TreasuryController {
             });
           }
 
+          projectData = project;
           treasuryPublicKey = new PublicKey(project.vault_public_key);
           tokenMint = project.mint_address ? new PublicKey(project.mint_address) : new PublicKey(config.customTokenMint!);
 
@@ -118,14 +122,25 @@ export class TreasuryController {
         treasuryBalance = 0;
       }
 
+      // Get SOL balance
+      const solBalance = await this.connection.getBalance(treasuryPublicKey) / 1e9; // Convert lamports to SOL
+
       // Get all token accounts for this treasury wallet
       let tokens: { symbol: string; balance: number; mint: string }[] = [];
+      
+      // Add SOL first
+      tokens.push({
+        symbol: 'SOL',
+        balance: solBalance,
+        mint: 'So11111111111111111111111111111111111111112'
+      });
+
       try {
         const tokenAccounts = await this.connection.getParsedTokenAccountsByOwner(treasuryPublicKey, {
           programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') // SPL Token Program
         });
 
-        tokens = tokenAccounts.value.map((accountInfo) => {
+        const spl_tokens = tokenAccounts.value.map((accountInfo) => {
           const parsedInfo = accountInfo.account.data.parsed.info;
           const mintAddress = parsedInfo.mint;
           const amount = parsedInfo.tokenAmount.uiAmount;
@@ -135,15 +150,8 @@ export class TreasuryController {
 
           // Check against project token mint
           if (mintAddress === tokenMint.toBase58()) {
-            // We don't have the symbol here easily without fetching more project data or metadata
-            // But the frontend knows the project symbol.
-            // For now, let's return a generic "Project Token" or try to use config if it matches
-            symbol = 'Project Token';
-
-            // Fallback to config GARG if matches
-            if (mintAddress === config.customTokenMint) {
-              symbol = 'GARG';
-            }
+            // Use project symbol if available
+            symbol = projectData?.symbol || 'Token';
           } else if (mintAddress === 'So11111111111111111111111111111111111111112') {
             symbol = 'SOL';
           } else if (mintAddress === 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v') {
@@ -156,8 +164,11 @@ export class TreasuryController {
             mint: mintAddress
           };
         }).filter(t => t.balance > 0);
+        
+        // Add SPL tokens to the list
+        tokens = [...tokens, ...spl_tokens];
       } catch (err) {
-        console.warn('Failed to fetch all token accounts for treasury:', err);
+        console.warn('Failed to fetch SPL token accounts for treasury:', err);
       }
 
       // Get total allocated from database (Scoped to project if applicable)
