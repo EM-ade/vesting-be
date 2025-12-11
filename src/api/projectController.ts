@@ -4,7 +4,7 @@ import { getConnection } from '../config';
 import { PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 
 export class ProjectController {
-  
+
   /**
    * GET /api/projects
    * List projects accessible to the connected wallet
@@ -15,7 +15,7 @@ export class ProjectController {
     try {
       const supabase = getSupabaseClient();
       const walletAddress = req.query.wallet as string;
-      
+
       // If wallet provided, filter by user access
       if (walletAddress) {
         // Get projects where user has access (use two queries for now - JOIN syntax might vary by Supabase version)
@@ -39,7 +39,7 @@ export class ProjectController {
         // Get project details for accessible projects
         const { data: projects, error: projectsError } = await supabase
           .from('projects')
-          .select('id, name, symbol, mint_address, logo_url, is_active')
+          .select('id, name, symbol, mint_address, logo_url, is_active, vault_public_key')
           .in('id', projectIds)
           .eq('is_active', true)
           .order('name');
@@ -51,7 +51,7 @@ export class ProjectController {
 
         return res.json(projects || []);
       }
-      
+
       // No wallet provided - return empty array (require authentication)
       res.json([]);
     } catch (error) {
@@ -71,7 +71,7 @@ export class ProjectController {
       const { id } = req.params;
       const supabase = getSupabaseClient();
       const connection = getConnection();
-      
+
       // Get project details (public information)
       const { data: project, error } = await supabase
         .from('projects')
@@ -96,12 +96,12 @@ export class ProjectController {
 
           // Update DB if balance changed significantly (> 0.0001 SOL diff)
           if (Math.abs(solBalanceFormatted - (project.vault_balance_sol || 0)) > 0.0001) {
-             await supabase
-               .from('projects')
-               .update({ vault_balance_sol: solBalanceFormatted })
-               .eq('id', id);
-             
-             project.vault_balance_sol = solBalanceFormatted;
+            await supabase
+              .from('projects')
+              .update({ vault_balance_sol: solBalanceFormatted })
+              .eq('id', id);
+
+            project.vault_balance_sol = solBalanceFormatted;
           }
         } catch (balErr) {
           console.warn(`Failed to fetch live balance for project ${id}:`, balErr);
@@ -126,7 +126,7 @@ export class ProjectController {
       const { id } = req.params;
       const { mint_address, logo_url, description, website_url } = req.body;
       const supabase = getSupabaseClient();
-      
+
       // SECURITY NOTE: This endpoint should be protected by requireAdmin middleware
       // which verifies the user has owner/admin role for this project
       // The middleware should have already checked access before this runs

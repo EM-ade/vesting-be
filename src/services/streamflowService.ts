@@ -32,9 +32,21 @@ export class StreamflowService {
     startTime: number;
     endTime: number;
     cliffTime?: number;
+    cliffPercentage?: number; // Optional: percentage to unlock at cliff (0-100)
     poolName: string;
+    tokenDecimals?: number; // Optional: token decimals (default 9 for SPL tokens)
   }): Promise<{ streamId: string; signature: string }> {
-    const { adminKeypair, tokenMint, totalAmount, startTime, endTime, cliffTime, poolName } = params;
+    const {
+      adminKeypair,
+      tokenMint,
+      totalAmount,
+      startTime,
+      endTime,
+      cliffTime,
+      cliffPercentage = 0,
+      poolName,
+      tokenDecimals = 9 // Default to 9 for Solana SPL tokens
+    } = params;
 
     try {
       console.log('Creating Streamflow pool...');
@@ -42,21 +54,37 @@ export class StreamflowService {
       console.log('Token Mint:', tokenMint.toBase58());
       console.log('Amount:', totalAmount);
       console.log('Duration:', startTime, '->', endTime);
+      console.log('Cliff:', cliffTime || 'None (starts at start time)');
 
       // Create stream where admin is BOTH sender and recipient
       // This allows admin to withdraw vested tokens and distribute them
       const duration = endTime - startTime;
-      const amountPerPeriod = Math.max(1, Math.floor(totalAmount / duration));
-      
+
+      // Use 60-second periods for smoother vesting (fixes period=1 issue)
+      // This means tokens vest every minute rather than every second
+      const periodSeconds = 60;
+      const numberOfPeriods = Math.max(1, Math.floor(duration / periodSeconds));
+      const amountPerPeriod = Math.max(1, Math.floor(totalAmount / numberOfPeriods));
+
+      // Calculate cliff amount if cliff percentage is set
+      const effectiveCliff = cliffTime || startTime;
+      const cliffAmount = cliffPercentage > 0
+        ? Math.floor(totalAmount * (cliffPercentage / 100))
+        : 0;
+
+      console.log('Period:', periodSeconds, 'seconds');
+      console.log('Amount per period:', amountPerPeriod);
+      console.log('Cliff amount:', cliffAmount, `(${cliffPercentage}%)`);
+
       const createStreamParams = {
         recipient: adminKeypair.publicKey.toBase58(), // Admin receives the vested tokens
         tokenId: tokenMint.toBase58(),
         start: startTime,
-        amount: getBN(totalAmount, 9), // 9 decimals for most SPL tokens
-        period: 1, // Vesting updates every second
-        cliff: cliffTime || startTime, // Cliff time (default to start if none)
-        cliffAmount: getBN(0, 9), // No cliff amount, just time-based
-        amountPerPeriod: getBN(amountPerPeriod, 9), // Ensure at least 1 token per period
+        amount: getBN(totalAmount, tokenDecimals),
+        period: periodSeconds, // Vesting updates every 60 seconds (improved from 1)
+        cliff: effectiveCliff, // Cliff time (defaults to start if none)
+        cliffAmount: getBN(cliffAmount, tokenDecimals), // Unlock this amount at cliff
+        amountPerPeriod: getBN(amountPerPeriod, tokenDecimals),
         name: poolName,
         canTopup: false,
         cancelableBySender: true,
@@ -91,7 +119,7 @@ export class StreamflowService {
   async withdrawFromPool(streamId: string, adminKeypair: Keypair, amount?: number): Promise<{ signature: string }> {
     try {
       console.log('Withdrawing from Streamflow pool:', streamId);
-      
+
       const withdrawResult = await this.client.withdraw(
         { id: streamId, amount: amount ? getBN(amount, 9) : undefined },
         { invoker: adminKeypair }
@@ -115,7 +143,7 @@ export class StreamflowService {
   async cancelVestingPool(streamId: string, adminKeypair: Keypair): Promise<{ signature: string; withdrew?: boolean }> {
     try {
       console.log('Canceling Streamflow pool:', streamId);
-      
+
       // Try to get stream info to check if it's completed
       let withdrew = false;
       try {
@@ -126,7 +154,7 @@ export class StreamflowService {
           const withdrawnAmount = getNumberFromBN(stream.withdrawnAmount, 9);
           const depositedAmount = getNumberFromBN(stream.depositedAmount, 9);
           const remainingAmount = depositedAmount - withdrawnAmount;
-          
+
           // If stream is completed and has remaining tokens, withdraw first
           if (now >= end && remainingAmount > 0) {
             console.log(`Stream is completed with ${remainingAmount} tokens remaining, withdrawing first...`);
@@ -148,7 +176,7 @@ export class StreamflowService {
       } catch (err: any) {
         console.log('Could not check stream status, proceeding with cancel:', err.message || err);
       }
-      
+
       const cancelResult = await this.client.cancel(
         { id: streamId },
         { invoker: adminKeypair }
@@ -181,7 +209,7 @@ export class StreamflowService {
   async getVestedAmount(streamId: string): Promise<number> {
     try {
       const stream = await this.client.getOne({ id: streamId });
-      
+
       if (!stream) {
         throw new Error('Stream not found');
       }

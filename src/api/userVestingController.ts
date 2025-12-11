@@ -640,7 +640,7 @@ export class UserVestingController {
         });
 
         const projectId = validVestings[0].project_id || validVestings[0].vesting_streams?.project_id;
-        
+
         if (projectId) {
           console.log(`[CLAIM] Found project ID: ${projectId}, fetching project details...`);
           const { data: derivedProject, error: projectError } = await this.dbService.supabase
@@ -675,10 +675,30 @@ export class UserVestingController {
 
       if (project) {
         console.log(`[CLAIM] Using project: ${project.name} (${project.id})`);
-        
-        // Multi-project mode: Fee is defined in Lamports in the project config
-        feeInLamports = Number(project.claim_fee_lamports || 1000000); // Default 0.001 SOL
-        feeInSol = feeInLamports / LAMPORTS_PER_SOL;
+
+        // 1. Try to get global claim fee (USD) from config
+        try {
+          const globalConfig = await this.dbService.getConfig();
+          if (globalConfig && globalConfig.claim_fee_usd !== undefined) {
+            claimFeeUsd = Number(globalConfig.claim_fee_usd);
+
+            // Calculate SOL amount
+            const { solAmount } = await this.priceService.calculateSolFee(claimFeeUsd);
+            feeInSol = solAmount;
+            feeInLamports = Math.floor(feeInSol * LAMPORTS_PER_SOL);
+
+            console.log(`[CLAIM] Using global claim fee: $${claimFeeUsd} (~${feeInSol.toFixed(6)} SOL)`);
+          } else {
+            // Fallback to project-level setting (legacy)
+            feeInLamports = Number(project.claim_fee_lamports || 1000000); // Default 0.001 SOL
+            feeInSol = feeInLamports / LAMPORTS_PER_SOL;
+            console.log(`[CLAIM] Using project/default fee: ${feeInSol} SOL`);
+          }
+        } catch (err) {
+          console.error('[CLAIM] Error fetching global config, falling back to default:', err);
+          feeInLamports = Number(project.claim_fee_lamports || 1000000);
+          feeInSol = feeInLamports / LAMPORTS_PER_SOL;
+        }
 
         // Use project fee recipient or fallback to vault
         if (project.fee_recipient_address) {
@@ -833,7 +853,7 @@ export class UserVestingController {
       // If project context is missing, try to derive it from the pool breakdown
       if (!project && poolBreakdown.length > 0) {
         console.log('[COMPLETE-CLAIM] No project context in request, attempting to derive...');
-        
+
         // Get the first vesting ID from breakdown
         const firstVestingId = poolBreakdown[0].vestingId;
         if (firstVestingId) {
