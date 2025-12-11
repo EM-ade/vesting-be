@@ -308,6 +308,24 @@ export class PoolController {
   }
 
   /**
+   * Helper: Verify that a pool belongs to the user's current project
+   * SECURITY: Prevents cross-project access
+   */
+  private async verifyPoolOwnership(poolId: string, projectId: string): Promise<boolean> {
+    const { data: pool, error } = await this.dbService.supabase
+      .from('vesting_streams')
+      .select('project_id')
+      .eq('id', poolId)
+      .single();
+
+    if (error || !pool) {
+      return false;
+    }
+
+    return pool.project_id === projectId;
+  }
+
+  /**
    * POST /api/pools/validate
    * Validate pool creation requirements before creating
    */
@@ -370,25 +388,12 @@ export class PoolController {
         });
       }
 
-      // Get project ID for validation and pool creation
-      const poolProjectId = req.projectId || req.project?.id || await (async () => {
-        // Fallback: Get the first available project
-        const { data: projects } = await this.dbService.supabase
-          .from('projects')
-          .select('id')
-          .eq('is_active', true)
-          .limit(1);
-
-        if (projects && projects.length > 0) {
-          console.log(`[CREATE-POOL] No project context, using first available project: ${projects[0].id}`);
-          return projects[0].id;
-        }
-        return null;
-      })();
+      // SECURITY: Project ID is REQUIRED for pool creation
+      const poolProjectId = req.projectId || req.project?.id;
 
       if (!poolProjectId) {
         return res.status(400).json({
-          error: 'No project context available. Please create a project first.',
+          error: 'Project ID is required. Please select a project or include x-project-id header.',
         });
       }
 
@@ -535,14 +540,28 @@ export class PoolController {
 
           // Parse admin keypair
           let adminKeypair: Keypair;
-          let tokenMint = config.customTokenMint!;
+
+          // PRIORITY: Use token_mint from request body if provided (per-pool token)
+          // Otherwise, fall back to project mint_address
+          let tokenMint: PublicKey;
+          const requestTokenMint = req.body.token_mint;
+
+          if (requestTokenMint) {
+            tokenMint = new PublicKey(requestTokenMint);
+            console.log('Using per-pool token mint from request:', requestTokenMint);
+          } else if (req.project && req.project.mint_address) {
+            tokenMint = new PublicKey(req.project.mint_address);
+            console.log('Using project default mint:', req.project.mint_address);
+          } else if (config.customTokenMint) {
+            tokenMint = config.customTokenMint;
+            console.log('Using global config token mint');
+          } else {
+            throw new Error('No token mint specified. Please provide token_mint in request or configure project mint.');
+          }
 
           if (req.projectId) {
             try {
               adminKeypair = await getVaultKeypairForProject(req.projectId);
-              if (req.project && req.project.mint_address) {
-                tokenMint = new PublicKey(req.project.mint_address);
-              }
             } catch (err) {
               console.error('Failed to get project vault:', err);
               throw new Error('Failed to access project vault');
@@ -559,6 +578,14 @@ export class PoolController {
           const endTimestamp = Math.floor(new Date(stream.end_time).getTime() / 1000);
           const nowTimestamp = Math.floor(Date.now() / 1000);
 
+          // Calculate cliff time if cliff_duration_days was provided
+          let cliffTimestamp: number | undefined = undefined;
+          if (stream.cliff_duration_days && stream.cliff_duration_days > 0) {
+            const effectiveStart = startTimestamp < nowTimestamp ? nowTimestamp + 60 : startTimestamp;
+            cliffTimestamp = effectiveStart + Math.floor(stream.cliff_duration_days * 86400);
+            console.log(`Cliff time calculated: ${cliffTimestamp} (${stream.cliff_duration_days} days after start)`);
+          }
+
           // Validate timestamps for Streamflow
           if (startTimestamp < nowTimestamp) {
             console.warn(`Start time ${startTimestamp} is in the past (now: ${nowTimestamp}). Adjusting to current time + 60 seconds.`);
@@ -566,6 +593,10 @@ export class PoolController {
             const adjustedStart = nowTimestamp + 60;
             const duration = endTimestamp - startTimestamp;
             const adjustedEnd = adjustedStart + duration;
+            // Adjust cliff time if it was set
+            if (cliffTimestamp) {
+              cliffTimestamp = adjustedStart + Math.floor(stream.cliff_duration_days * 86400);
+            }
 
             const streamflowResult = await this.streamflowService.createVestingPool({
               adminKeypair,
@@ -573,6 +604,7 @@ export class PoolController {
               totalAmount: stream.total_pool_amount,
               startTime: adjustedStart,
               endTime: adjustedEnd,
+              cliffTime: cliffTimestamp,
               poolName: stream.name,
             });
 
@@ -585,6 +617,7 @@ export class PoolController {
               totalAmount: stream.total_pool_amount,
               startTime: startTimestamp,
               endTime: endTimestamp,
+              cliffTime: cliffTimestamp,
               poolName: stream.name,
             });
 
@@ -612,14 +645,14 @@ export class PoolController {
       if (vesting_mode === 'snapshot') {
         // Snapshot pools: trigger snapshot immediately
         console.log(`📸 Triggering immediate snapshot for pool: ${stream.name}`);
-        
+
         // Import snapshot services
         const { SnapshotConfigService } = await import('../services/snapshotConfigService');
         const { HeliusNFTService } = await import('../services/heliusNFTService');
-        
+
         const heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
         const snapshotConfigService = new SnapshotConfigService(heliusService);
-        
+
         // Convert pool rules to snapshot config
         const snapshotConfig = {
           poolSize: stream.total_pool_amount,
@@ -635,11 +668,11 @@ export class PoolController {
             enabled: rule.enabled !== false,
           })),
         };
-        
+
         // Process snapshot asynchronously with better error handling
         console.log(`[SNAPSHOT] Starting snapshot process for pool ${stream.id}`);
         console.log(`[SNAPSHOT] Rules:`, JSON.stringify(snapshotConfig.rules, null, 2));
-        
+
         snapshotConfigService.processSnapshotRules(snapshotConfig)
           .then(async (result) => {
             console.log(`[SNAPSHOT] Process completed. Result:`, JSON.stringify({
@@ -647,10 +680,10 @@ export class PoolController {
               totalAllocated: result.totalAllocated,
               totalWallets: result.totalWallets
             }, null, 2));
-            
+
             if (result.allocations && result.allocations.length > 0) {
               console.log(`✅ Snapshot found ${result.allocations.length} eligible wallets`);
-              
+
               // Create vesting records
               const vestingRecords = result.allocations.map((allocation: any) => ({
                 project_id: poolProjectId,
@@ -664,25 +697,25 @@ export class PoolController {
                 is_cancelled: false,
                 snapshot_locked: true,
               }));
-              
+
               console.log(`[SNAPSHOT] Inserting ${vestingRecords.length} vesting records...`);
               const { error: insertError } = await this.dbService.supabase.from('vestings').insert(vestingRecords);
-              
+
               if (insertError) {
                 console.error(`[SNAPSHOT] Failed to insert vestings:`, insertError);
                 throw insertError;
               }
-              
+
               // Mark snapshot as taken
               const { error: updateError } = await this.dbService.supabase
                 .from('vesting_streams')
                 .update({ snapshot_taken: true })
                 .eq('id', stream.id);
-              
+
               if (updateError) {
                 console.error(`[SNAPSHOT] Failed to mark snapshot as taken:`, updateError);
               }
-              
+
               console.log(`✅ Snapshot completed: ${vestingRecords.length} vestings created for pool ${stream.id}`);
             } else {
               console.warn(`⚠️ No eligible wallets found for snapshot pool ${stream.name}`);
@@ -730,10 +763,10 @@ export class PoolController {
     try {
       // SECURITY: Project ID is REQUIRED for listing pools
       const projectId = req.projectId || req.headers['x-project-id'] as string;
-      
+
       if (!projectId) {
-        return res.status(400).json({ 
-          error: 'Project ID is required. Please select a project first.' 
+        return res.status(400).json({
+          error: 'Project ID is required. Please select a project first.'
         });
       }
 
@@ -940,6 +973,12 @@ export class PoolController {
 
       if (!projectId) {
         return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // SECURITY: Verify pool belongs to user's project
+      const hasAccess = await this.verifyPoolOwnership(id, projectId);
+      if (!hasAccess) {
+        return res.status(404).json({ error: 'Pool not found or access denied' });
       }
 
       // SECURITY: Get current pool - must belong to user's project
@@ -1166,12 +1205,25 @@ export class PoolController {
     try {
       const { id } = req.params;
       const { name, nftContract, threshold, allocationType, allocationValue, enabled } = req.body;
+      const projectId = req.projectId || req.headers['x-project-id'] as string;
+
+      // SECURITY: Verify project context
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // SECURITY: Verify pool belongs to user's project
+      const hasAccess = await this.verifyPoolOwnership(id, projectId);
+      if (!hasAccess) {
+        return res.status(404).json({ error: 'Pool not found or access denied' });
+      }
 
       // Get current pool
       const { data: pool, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
         .eq('id', id)
+        .eq('project_id', projectId)
         .single();
 
       if (fetchError || !pool) {
