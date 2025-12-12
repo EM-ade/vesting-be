@@ -93,7 +93,7 @@ export class StreamflowService {
       console.log('Period:', periodSeconds, 'seconds');
       console.log('Number of periods:', numberOfPeriods);
       console.log('Cliff amount:', cliffAmount, `(${cliffPercentage}%)`);
-      console.log('Vesting amount:', vestingAmount, '(total - cliff)');
+      console.log('Vesting amount:', getNumberFromBN(vestingAmountBN, tokenDecimals), '(total - cliff)');
       console.log('Amount per period (BN):', amountPerPeriodBN.toString());
       console.log('Adjusted total:', adjustedTotal, '(to match Streamflow validation)');
 

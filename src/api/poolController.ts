@@ -115,6 +115,9 @@ export class PoolController {
             }
             adminKeypair = Keypair.fromSecretKey(decoded);
           }
+
+          // Token mint is already resolved above as 'tokenMint' variable
+          // const tokenMint = pool.token_mint ? new PublicKey(pool.token_mint) : new PublicKey(config.tokenMint);
           result.checks.treasury.address = adminKeypair.publicKey.toBase58();
         }
       } catch (err) {
@@ -620,6 +623,9 @@ export class PoolController {
             const decoded = bs58.decode(config.adminPrivateKey);
             adminKeypair = Keypair.fromSecretKey(decoded);
           }
+
+          // Token mint is already resolved above
+          // const tokenMint = ... (removed redundant declaration)
 
           // Ensure admin has an Associated Token Account (ATA) for this mint
           // This fixes "TokenAccountNotFoundError" by creating it if it doesn't exist
@@ -1446,6 +1452,9 @@ export class PoolController {
             const decoded = bs58.decode(config.adminPrivateKey);
             adminKeypair = Keypair.fromSecretKey(decoded);
           }
+
+          // Resolve token mint
+          const tokenMint = pool.token_mint ? new PublicKey(pool.token_mint) : (config.customTokenMint || new PublicKey('So11111111111111111111111111111111111111112')); // Fallback if no custom mint
 
           // Ensure admin has an Associated Token Account (ATA) for this mint
           // This fixes "TokenAccountNotFoundError" by creating it if it doesn't exist
