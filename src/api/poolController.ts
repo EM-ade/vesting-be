@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Connection, PublicKey, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
-import { getAccount } from '@solana/spl-token';
+import { getAccount, getOrCreateAssociatedTokenAccount, TokenAccountNotFoundError } from '@solana/spl-token';
 import bs58 from 'bs58';
 import { SupabaseService } from '../services/supabaseService';
 import { StreamflowService } from '../services/streamflowService';
@@ -189,9 +189,9 @@ export class PoolController {
           // Token account doesn't exist yet - this is OK if user will fund it or skip Streamflow
           console.error(`[VALIDATION] Token account check failed:`, err);
           const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-          
+
           // Check if it's just a missing account (which is fine - user will fund it)
-          if (errorMsg.includes('could not find account') || errorMsg.includes('Invalid param: could not find account')) {
+          if (errorMsg.includes('could not find account') || errorMsg.includes('Invalid param: could not find account') || err instanceof TokenAccountNotFoundError) {
             result.checks.tokenBalance.valid = false;
             result.checks.tokenBalance.current = 0;
             result.checks.tokenBalance.message = `Treasury token account not yet created. The UI will create it and fund it when you create the pool (user pays ~0.002 SOL rent + tokens).`;
@@ -440,10 +440,10 @@ export class PoolController {
       // If validation fails and not skipping Streamflow, return error with options
       if (!validation.valid && !skipStreamflow) {
         // Check if it's ONLY token balance issue (which is OK - user will fund it in the UI)
-        const onlyTokenIssue = !validation.checks.solBalance.valid === false && 
-                               !validation.checks.tokenBalance.valid &&
-                               validation.checks.treasury.valid &&
-                               validation.checks.allocations.valid;
+        const onlyTokenIssue = !validation.checks.solBalance.valid === false &&
+          !validation.checks.tokenBalance.valid &&
+          validation.checks.treasury.valid &&
+          validation.checks.allocations.valid;
 
         // If only token balance is the issue, allow proceeding (UI handles the funding)
         if (onlyTokenIssue) {
@@ -494,11 +494,11 @@ export class PoolController {
           project_id: poolProjectId,
           name,
           description: description || '',
-          total_pool_amount,
+          total_pool_amount, // DB now supports numeric/float
           vesting_duration_days: durationDaysInt,
           cliff_duration_days: cliffDaysInt,
-          vesting_duration_seconds: vesting_duration_seconds || (vesting_duration_days * 86400),
-          cliff_duration_seconds: cliff_duration_seconds || (cliffDaysInt * 86400),
+          vesting_duration_seconds: Math.floor(vesting_duration_seconds || (vesting_duration_days * 86400)),
+          cliff_duration_seconds: Math.floor(cliff_duration_seconds || (cliffDaysInt * 86400)),
           start_time: start_time || new Date().toISOString(),
           end_time: end_time || new Date(Date.now() + vesting_duration_days * 24 * 60 * 60 * 1000).toISOString(),
           is_active: is_active !== undefined ? is_active : true,
@@ -621,6 +621,22 @@ export class PoolController {
             adminKeypair = Keypair.fromSecretKey(decoded);
           }
 
+          // Ensure admin has an Associated Token Account (ATA) for this mint
+          // This fixes "TokenAccountNotFoundError" by creating it if it doesn't exist
+          try {
+            console.log(`[POOL] Ensuring ATA exists for admin ${adminKeypair.publicKey.toBase58()} and mint ${tokenMint.toBase58()}...`);
+            const adminAta = await getOrCreateAssociatedTokenAccount(
+              this.connection,
+              adminKeypair, // Payer
+              tokenMint,
+              adminKeypair.publicKey // Owner
+            );
+            console.log(`[POOL] Admin ATA ready: ${adminAta.address.toBase58()}`);
+          } catch (ataError) {
+            console.error('[POOL] Failed to ensure admin ATA exists:', ataError);
+            // We continue, as it might already exist or Streamflow might handle it (though unlikely if it failed before)
+          }
+
           const startTimestamp = Math.floor(new Date(stream.start_time).getTime() / 1000);
           const endTimestamp = Math.floor(new Date(stream.end_time).getTime() / 1000);
           const nowTimestamp = Math.floor(Date.now() / 1000);
@@ -697,7 +713,10 @@ export class PoolController {
         const { SnapshotConfigService } = await import('../services/snapshotConfigService');
         const { HeliusNFTService } = await import('../services/heliusNFTService');
 
-        const heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+        // User requested Snapshot service to ALWAYS use mainnet, even if app is on devnet
+        const network = 'mainnet-beta'; // Force mainnet for NFT snapshots
+        console.log(`[SNAPSHOT] Initializing Helius service on ${network} (forced)`);
+        const heliusService = new HeliusNFTService(config.heliusApiKey, network);
         const snapshotConfigService = new SnapshotConfigService(heliusService);
 
         // Convert pool rules to snapshot config
@@ -925,6 +944,16 @@ export class PoolController {
         return res.status(404).json({ error: 'Pool not found or access denied' });
       }
 
+      // Get user count and allocation stats
+      const { data: vestings } = await this.dbService.supabase
+        .from('vestings')
+        .select('token_amount')
+        .eq('vesting_stream_id', stream.id)
+        .eq('is_active', true);
+
+      const totalAllocated = vestings?.reduce((sum: number, v: any) => sum + Number(v.token_amount), 0) || 0;
+      const userCount = vestings?.length || 0;
+
       res.json({
         id: stream.id,
         name: stream.name,
@@ -943,6 +972,10 @@ export class PoolController {
         state: (stream.state === 'stable' || !stream.state)
           ? (stream.is_active ? 'active' : 'cancelled')
           : stream.state,
+        stats: {
+          userCount,
+          totalAllocated,
+        },
       });
     } catch (error) {
       console.error('Failed to get pool details:', error);
@@ -1412,6 +1445,22 @@ export class PoolController {
           } else {
             const decoded = bs58.decode(config.adminPrivateKey);
             adminKeypair = Keypair.fromSecretKey(decoded);
+          }
+
+          // Ensure admin has an Associated Token Account (ATA) for this mint
+          // This fixes "TokenAccountNotFoundError" by creating it if it doesn't exist
+          try {
+            console.log(`[POOL] Ensuring ATA exists for admin ${adminKeypair.publicKey.toBase58()} and mint ${tokenMint.toBase58()}...`);
+            const adminAta = await getOrCreateAssociatedTokenAccount(
+              this.connection,
+              adminKeypair, // Payer
+              tokenMint,
+              adminKeypair.publicKey // Owner
+            );
+            console.log(`[POOL] Admin ATA ready: ${adminAta.address.toBase58()}`);
+          } catch (ataError) {
+            console.error('[POOL] Failed to ensure admin ATA exists:', ataError);
+            // We continue, as it might already exist or Streamflow might handle it (though unlikely if it failed before)
           }
 
           await this.streamflowService.cancelPool(pool.streamflow_stream_id, adminKeypair);

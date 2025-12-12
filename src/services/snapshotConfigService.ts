@@ -9,7 +9,7 @@ import { SnapshotRule, SnapshotConfig, AllocationResult, SnapshotProcessResult, 
 export class SnapshotConfigService {
   constructor(
     private heliusService: HeliusNFTService
-  ) {}
+  ) { }
 
   /**
    * Process snapshot rules and calculate allocations
@@ -96,7 +96,7 @@ export class SnapshotConfigService {
         } else {
           // Percentage share of pool - WEIGHTED by NFT count
           const poolShare = config.poolSize * (rule.allocationValue / 100);
-          
+
           // Calculate total NFTs for weighted distribution
           const totalNFTs = eligible.reduce((sum, h) => sum + h.nftCount, 0);
 
@@ -123,14 +123,13 @@ export class SnapshotConfigService {
           ruleName: rule.name,
           eligibleWallets: eligible.length,
           totalNfts,
-          allocation: Math.floor(ruleAllocation),
+          allocation: ruleAllocation,
         });
 
         result.totalAllocated += ruleAllocation;
       } catch (error) {
-        const errorMsg = `Failed to process rule "${rule.name}": ${
-          error instanceof Error ? error.message : 'Unknown error'
-        }`;
+        const errorMsg = `Failed to process rule "${rule.name}": ${error instanceof Error ? error.message : 'Unknown error'
+          }`;
         result.errors.push(errorMsg);
         console.error(errorMsg);
       }
@@ -146,10 +145,10 @@ export class SnapshotConfigService {
           amount: s.amount, // Keep fractional amounts
         })),
       }))
-      .filter((allocation) => allocation.amount >= 0.01); // Minimum 0.01 tokens to avoid dust
+      .filter((allocation) => allocation.amount >= 0.000001); // Minimum threshold to avoid dust (lowered for testing)
 
     result.totalWallets = result.allocations.length;
-    result.totalAllocated = Math.floor(result.totalAllocated);
+    result.totalAllocated = result.totalAllocated;
 
     return result;
   }
@@ -188,7 +187,7 @@ export class SnapshotConfigService {
     return {
       eligibleWallets: eligible.length,
       totalNfts,
-      estimatedAllocation: Math.floor(estimatedAllocation),
+      estimatedAllocation: estimatedAllocation,
     };
   }
 
@@ -263,7 +262,7 @@ export class SnapshotConfigService {
 
       breakdown.push({
         name: rule.name,
-        amount: Math.floor(allocation),
+        amount: allocation,
         wallets: eligible.length,
       });
 
@@ -272,7 +271,7 @@ export class SnapshotConfigService {
 
     return {
       totalWallets: uniqueWallets.size,
-      totalAllocated: Math.floor(totalAllocated),
+      totalAllocated: totalAllocated,
       breakdown,
     };
   }

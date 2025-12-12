@@ -73,20 +73,30 @@ export class StreamflowService {
 
       // CRITICAL: Streamflow validation requires: amount = (amountPerPeriod * numberOfPeriods) + cliffAmount
       // We must calculate amountPerPeriod to satisfy this equation exactly
-      const vestingAmount = totalAmount - cliffAmount; // Amount that vests over time (excluding cliff)
-      const amountPerPeriod = Math.floor(vestingAmount / numberOfPeriods);
-      
+
+      // Convert to raw units (BN) first
+      const totalAmountBN = getBN(totalAmount, tokenDecimals);
+      const cliffAmountBN = getBN(cliffAmount, tokenDecimals);
+      const vestingAmountBN = totalAmountBN.sub(cliffAmountBN);
+
+      // Calculate amount per period in raw units
+      const numberOfPeriodsBN = new BN(numberOfPeriods);
+      const amountPerPeriodBN = vestingAmountBN.div(numberOfPeriodsBN);
+
       // Recalculate total to match Streamflow's expectation (handles rounding)
-      const adjustedTotal = (amountPerPeriod * numberOfPeriods) + cliffAmount;
+      const adjustedTotalBN = amountPerPeriodBN.mul(numberOfPeriodsBN).add(cliffAmountBN);
+
+      // Convert back to number for logging (approximate)
+      const adjustedTotal = getNumberFromBN(adjustedTotalBN, tokenDecimals);
 
       console.log('Duration:', duration, 'seconds');
       console.log('Period:', periodSeconds, 'seconds');
       console.log('Number of periods:', numberOfPeriods);
       console.log('Cliff amount:', cliffAmount, `(${cliffPercentage}%)`);
       console.log('Vesting amount:', vestingAmount, '(total - cliff)');
-      console.log('Amount per period:', amountPerPeriod);
+      console.log('Amount per period (BN):', amountPerPeriodBN.toString());
       console.log('Adjusted total:', adjustedTotal, '(to match Streamflow validation)');
-      
+
       if (adjustedTotal !== totalAmount) {
         console.warn(`⚠️  Total adjusted from ${totalAmount} to ${adjustedTotal} due to rounding (diff: ${totalAmount - adjustedTotal})`);
       }
@@ -95,11 +105,11 @@ export class StreamflowService {
         recipient: adminKeypair.publicKey.toBase58(), // Admin receives the vested tokens
         tokenId: tokenMint.toBase58(),
         start: startTime,
-        amount: getBN(adjustedTotal, tokenDecimals), // Use adjusted total that satisfies Streamflow equation
+        amount: adjustedTotalBN, // Use adjusted total that satisfies Streamflow equation
         period: periodSeconds, // Vesting updates every 60 seconds (improved from 1)
         cliff: effectiveCliff, // Cliff time (defaults to start if none)
-        cliffAmount: getBN(cliffAmount, tokenDecimals), // Unlock this amount at cliff
-        amountPerPeriod: getBN(amountPerPeriod, tokenDecimals),
+        cliffAmount: cliffAmountBN, // Unlock this amount at cliff
+        amountPerPeriod: amountPerPeriodBN,
         name: poolName,
         canTopup: false,
         cancelableBySender: true,
