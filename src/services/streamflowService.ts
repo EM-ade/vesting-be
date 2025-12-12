@@ -64,7 +64,6 @@ export class StreamflowService {
       // This means tokens vest every minute rather than every second
       const periodSeconds = 60;
       const numberOfPeriods = Math.max(1, Math.floor(duration / periodSeconds));
-      const amountPerPeriod = Math.max(1, Math.floor(totalAmount / numberOfPeriods));
 
       // Calculate cliff amount if cliff percentage is set
       const effectiveCliff = cliffTime || startTime;
@@ -72,15 +71,31 @@ export class StreamflowService {
         ? Math.floor(totalAmount * (cliffPercentage / 100))
         : 0;
 
+      // CRITICAL: Streamflow validation requires: amount = (amountPerPeriod * numberOfPeriods) + cliffAmount
+      // We must calculate amountPerPeriod to satisfy this equation exactly
+      const vestingAmount = totalAmount - cliffAmount; // Amount that vests over time (excluding cliff)
+      const amountPerPeriod = Math.floor(vestingAmount / numberOfPeriods);
+      
+      // Recalculate total to match Streamflow's expectation (handles rounding)
+      const adjustedTotal = (amountPerPeriod * numberOfPeriods) + cliffAmount;
+
+      console.log('Duration:', duration, 'seconds');
       console.log('Period:', periodSeconds, 'seconds');
-      console.log('Amount per period:', amountPerPeriod);
+      console.log('Number of periods:', numberOfPeriods);
       console.log('Cliff amount:', cliffAmount, `(${cliffPercentage}%)`);
+      console.log('Vesting amount:', vestingAmount, '(total - cliff)');
+      console.log('Amount per period:', amountPerPeriod);
+      console.log('Adjusted total:', adjustedTotal, '(to match Streamflow validation)');
+      
+      if (adjustedTotal !== totalAmount) {
+        console.warn(`⚠️  Total adjusted from ${totalAmount} to ${adjustedTotal} due to rounding (diff: ${totalAmount - adjustedTotal})`);
+      }
 
       const createStreamParams = {
         recipient: adminKeypair.publicKey.toBase58(), // Admin receives the vested tokens
         tokenId: tokenMint.toBase58(),
         start: startTime,
-        amount: getBN(totalAmount, tokenDecimals),
+        amount: getBN(adjustedTotal, tokenDecimals), // Use adjusted total that satisfies Streamflow equation
         period: periodSeconds, // Vesting updates every 60 seconds (improved from 1)
         cliff: effectiveCliff, // Cliff time (defaults to start if none)
         cliffAmount: getBN(cliffAmount, tokenDecimals), // Unlock this amount at cliff
