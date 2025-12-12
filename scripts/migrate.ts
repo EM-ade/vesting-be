@@ -20,7 +20,8 @@ const MIGRATION_ORDER = [
   'update_role_check_constraint.sql',
   '01_fix_vesting_mode.sql',
   '02_backfill_project_id.sql',
-  '03_enhance_pool_schema.sql'
+  '03_enhance_pool_schema.sql',
+  '05_change_amount_to_numeric.sql'
 ];
 
 const migrate = async () => {
