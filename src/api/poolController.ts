@@ -55,7 +55,8 @@ export class PoolController {
       allocationValue: number;
       enabled: boolean;
     }>;
-    projectId?: string; // Add projectId parameter
+    projectId?: string;
+    token_mint?: string; // Per-pool token mint
   }): Promise<ValidationResult> {
     const result: ValidationResult = {
       valid: true,
@@ -153,33 +154,61 @@ export class PoolController {
         result.checks.solBalance.message = `SOL balance sufficient: ${solBalanceInSOL.toFixed(4)} SOL`;
       }
 
-      // 3. Check token balance
-      if (config.customTokenMint) {
+      // 3. Check token balance (use per-pool token_mint if provided, else fall back to config)
+      const tokenMintToCheck = params.token_mint
+        ? new PublicKey(params.token_mint)
+        : config.customTokenMint;
+
+      if (tokenMintToCheck) {
         try {
           const { getAssociatedTokenAddress } = await import('@solana/spl-token');
           const treasuryTokenAccount = await getAssociatedTokenAddress(
-            config.customTokenMint,
+            tokenMintToCheck,
             adminKeypair.publicKey
           );
+
+          console.log(`[VALIDATION] Checking token balance for mint: ${tokenMintToCheck.toBase58()}`);
+          console.log(`[VALIDATION] Treasury: ${adminKeypair.publicKey.toBase58()}`);
+          console.log(`[VALIDATION] Token account (ATA): ${treasuryTokenAccount.toBase58()}`);
 
           const tokenAccountInfo = await getAccount(this.connection, treasuryTokenAccount);
           const tokenBalance = Number(tokenAccountInfo.amount) / 1e9;
           result.checks.tokenBalance.current = tokenBalance;
 
+          console.log(`[VALIDATION] Token balance found: ${tokenBalance}`);
+
           if (tokenBalance < params.total_pool_amount) {
             result.checks.tokenBalance.valid = false;
-            result.checks.tokenBalance.message = `Insufficient tokens. Required: ${params.total_pool_amount}, Available: ${tokenBalance}`;
-            result.errors.push(result.checks.tokenBalance.message);
-            result.valid = false;
+            result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${params.total_pool_amount}, Available: ${tokenBalance}. You can fund the treasury first, or create pool without Streamflow deployment.`;
+            result.warnings.push(result.checks.tokenBalance.message);
+            // Don't set result.valid = false here - allow proceeding without Streamflow
           } else {
             result.checks.tokenBalance.message = `Token balance sufficient: ${tokenBalance}`;
           }
         } catch (err) {
-          result.checks.tokenBalance.valid = false;
-          result.checks.tokenBalance.message = `Token account not found or error checking balance`;
-          result.errors.push(result.checks.tokenBalance.message);
-          result.valid = false;
+          // Token account doesn't exist yet - this is OK if user will fund it or skip Streamflow
+          console.error(`[VALIDATION] Token account check failed:`, err);
+          const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+          
+          // Check if it's just a missing account (which is fine - user will fund it)
+          if (errorMsg.includes('could not find account') || errorMsg.includes('Invalid param: could not find account')) {
+            result.checks.tokenBalance.valid = false;
+            result.checks.tokenBalance.current = 0;
+            result.checks.tokenBalance.message = `Treasury token account not yet created. The UI will create it and fund it when you create the pool (user pays ~0.002 SOL rent + tokens).`;
+            result.warnings.push(result.checks.tokenBalance.message);
+          } else {
+            result.checks.tokenBalance.valid = false;
+            result.checks.tokenBalance.message = `Error checking token balance: ${errorMsg}`;
+            result.errors.push(result.checks.tokenBalance.message);
+          }
+          // Don't set result.valid = false - allow proceeding (user will fund in the transaction)
         }
+      } else {
+        // No token mint configured - this is OK for testing/manual setup
+        console.warn(`[VALIDATION] No token mint configured. Skipping token balance check.`);
+        result.checks.tokenBalance.valid = false;
+        result.checks.tokenBalance.message = `No token mint specified. Pool can be created without Streamflow deployment (database-only mode).`;
+        result.warnings.push(result.checks.tokenBalance.message);
       }
 
       // 4. Validate allocations (manual mode only)
@@ -331,7 +360,7 @@ export class PoolController {
    */
   async validatePool(req: Request, res: Response) {
     try {
-      const { start_time, total_pool_amount, vesting_mode, manual_allocations, rules } = req.body;
+      const { start_time, total_pool_amount, vesting_mode, manual_allocations, rules, token_mint } = req.body;
       const projectId = req.projectId || req.project?.id;
 
       const validation = await this.validatePoolCreation({
@@ -340,7 +369,8 @@ export class PoolController {
         vesting_mode: vesting_mode || 'snapshot',
         manual_allocations,
         rules,
-        projectId, // Pass projectId
+        projectId,
+        token_mint, // Pass per-pool token mint
       });
 
       res.json(validation);
@@ -397,33 +427,50 @@ export class PoolController {
         });
       }
 
-      // Run validation with projectId
+      // Run validation with projectId and token_mint
       const validation = await this.validatePoolCreation({
         start_time,
         total_pool_amount,
         vesting_mode: vesting_mode || 'snapshot',
         manual_allocations,
-        projectId: poolProjectId, // Pass projectId for vault keypair lookup
+        projectId: poolProjectId,
+        token_mint: req.body.token_mint, // Pass per-pool token mint
       });
 
       // If validation fails and not skipping Streamflow, return error with options
       if (!validation.valid && !skipStreamflow) {
-        return res.status(400).json({
-          success: false,
-          error: 'Pool validation failed',
-          errorType: validation.checks.solBalance.valid ? 'INSUFFICIENT_TOKENS' : 'INSUFFICIENT_SOL',
-          validation,
-          options: {
-            canProceedWithoutStreamflow: validation.canProceedWithoutStreamflow,
-            canAdjustTimestamp: !validation.checks.timestamp.valid,
-            adjustedTimestamp: validation.checks.timestamp.adjustedStart,
-          },
-          suggestions: [
-            ...(!validation.checks.solBalance.valid ? [`Fund treasury wallet (${validation.checks.treasury.address}) with at least 0.015 SOL`] : []),
-            ...(!validation.checks.tokenBalance.valid ? [`Fund treasury wallet with at least ${total_pool_amount} tokens`] : []),
-            ...(validation.canProceedWithoutStreamflow ? ['Create pool without Streamflow deployment (database only)'] : []),
-          ],
-        });
+        // Check if it's ONLY token balance issue (which is OK - user will fund it in the UI)
+        const onlyTokenIssue = !validation.checks.solBalance.valid === false && 
+                               !validation.checks.tokenBalance.valid &&
+                               validation.checks.treasury.valid &&
+                               validation.checks.allocations.valid;
+
+        // If only token balance is the issue, allow proceeding (UI handles the funding)
+        if (onlyTokenIssue) {
+          console.log('[VALIDATION] Only token balance issue - allowing to proceed (UI will handle funding)');
+          // Continue to pool creation - don't return error
+        } else {
+          return res.status(400).json({
+            success: false,
+            error: 'Pool validation failed',
+            errorType: validation.checks.solBalance.valid ? 'INSUFFICIENT_TOKENS' : 'INSUFFICIENT_SOL',
+            validation,
+            options: {
+              canProceedWithoutStreamflow: validation.canProceedWithoutStreamflow,
+              canAdjustTimestamp: !validation.checks.timestamp.valid,
+              adjustedTimestamp: validation.checks.timestamp.adjustedStart,
+            },
+            suggestions: [
+              ...(!validation.checks.solBalance.valid ? [`Fund treasury wallet (${validation.checks.treasury.address}) with at least 0.015 SOL`] : []),
+              ...(!validation.checks.tokenBalance.valid && validation.checks.tokenBalance.current > 0 ? [
+                `Treasury wallet has ${validation.checks.tokenBalance.current} tokens but needs ${total_pool_amount}`,
+                `Transfer ${total_pool_amount - validation.checks.tokenBalance.current} more tokens, or`,
+                `Enable "Skip Streamflow Deployment" to create a database-only pool`
+              ] : []),
+              ...(validation.checks.allocations.valid === false ? ['Fix allocation errors before proceeding'] : []),
+            ],
+          });
+        }
       }
 
       // Convert fractional days to integer (round up to at least 1 day for DB storage)
