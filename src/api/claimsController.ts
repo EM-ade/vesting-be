@@ -24,6 +24,7 @@ export class ClaimsController {
     try {
       const { limit = 50, offset = 0, status, wallet } = req.query;
       const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
+      const poolId = req.query.poolId as string;
 
       let query = this.dbService.supabase
         .from('claim_history')
@@ -34,6 +35,22 @@ export class ClaimsController {
       // SECURITY: Filter by project if provided
       if (projectId) {
         query = query.eq('project_id', projectId);
+      }
+
+      if (poolId && poolId !== 'all') {
+        // Filter claims by pool (vesting_stream_id)
+        const { data: poolVestings } = await this.dbService.supabase
+          .from('vestings')
+          .select('id')
+          .eq('vesting_stream_id', poolId);
+
+        const vestingIds = poolVestings?.map((v: { id: string }) => v.id) || [];
+
+        if (vestingIds.length > 0) {
+          query = query.in('vesting_id', vestingIds);
+        } else {
+          query = query.in('vesting_id', [-1]);
+        }
       }
 
       if (status) {
@@ -78,6 +95,7 @@ export class ClaimsController {
   async getClaimStats(req: Request, res: Response) {
     try {
       const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
+      const poolId = req.query.poolId as string;
 
       // SECURITY: Get total claims count for this project
       let totalQuery = this.dbService.supabase
@@ -87,6 +105,27 @@ export class ClaimsController {
       if (projectId) {
         totalQuery = totalQuery.eq('project_id', projectId);
       }
+
+      // Helper to apply pool filter
+      const applyPoolFilter = async (query: any) => {
+        if (poolId && poolId !== 'all') {
+          const { data: poolVestings } = await this.dbService.supabase
+            .from('vestings')
+            .select('id')
+            .eq('vesting_stream_id', poolId);
+
+          const vestingIds = poolVestings?.map((v: { id: string }) => v.id) || [];
+
+          if (vestingIds.length > 0) {
+            return query.in('vesting_id', vestingIds);
+          } else {
+            return query.in('vesting_id', [-1]);
+          }
+        }
+        return query;
+      };
+
+      totalQuery = await applyPoolFilter(totalQuery);
 
       const { count: totalClaims } = await totalQuery;
 
@@ -102,6 +141,7 @@ export class ClaimsController {
       if (projectId) {
         claimDataQuery = claimDataQuery.eq('project_id', projectId);
       }
+      claimDataQuery = await applyPoolFilter(claimDataQuery);
 
       const { data: claimData } = await claimDataQuery;
       const totalAmountClaimed = claimData?.reduce((sum: number, c: any) => sum + (Number(c.amount_claimed) || 0), 0) / 1e9 || 0;
@@ -116,6 +156,7 @@ export class ClaimsController {
       if (projectId) {
         claims24hQuery = claims24hQuery.eq('project_id', projectId);
       }
+      claims24hQuery = await applyPoolFilter(claims24hQuery);
 
       const { count: claims24h } = await claims24hQuery;
 
@@ -129,6 +170,7 @@ export class ClaimsController {
       if (projectId) {
         claims7dQuery = claims7dQuery.eq('project_id', projectId);
       }
+      claims7dQuery = await applyPoolFilter(claims7dQuery);
 
       const { count: claims7d } = await claims7dQuery;
 
@@ -140,9 +182,10 @@ export class ClaimsController {
       if (projectId) {
         uniqueUsersQuery = uniqueUsersQuery.eq('project_id', projectId);
       }
+      uniqueUsersQuery = await applyPoolFilter(uniqueUsersQuery);
 
       const { data: uniqueUsers } = await uniqueUsersQuery;
-      
+
       const uniqueUserCount = new Set(uniqueUsers?.map((u: any) => u.user_wallet)).size;
 
       res.json({
@@ -209,6 +252,7 @@ export class ClaimsController {
     try {
       const { id } = req.params;
       const { reason, adminWallet } = req.body;
+      const projectId = req.projectId || req.headers['x-project-id'] as string || req.body.projectId;
 
       if (!id || !adminWallet) {
         return res.status(400).json({ error: 'Claim ID and adminWallet are required' });
@@ -217,15 +261,19 @@ export class ClaimsController {
       // Note: claim_history table doesn't have status/flag_reason columns
       // For now, log the flag action in admin_actions table
       // TODO: Add flagged_claims table or add columns to claim_history
-      
+
       await this.dbService.supabase
-        .from('admin_actions')
+        .from('admin_logs')
         .insert({
           action: 'flag_claim',
           admin_wallet: adminWallet,
-          details: { claimId: id, reason },
-          target_type: 'claim',
-          target_id: id,
+          details: {
+            project_id: projectId, // Add project_id to details since column doesn't exist
+            claimId: id,
+            reason,
+            target_type: 'claim',
+            target_id: id
+          },
           created_at: new Date().toISOString(),
         });
 

@@ -65,7 +65,7 @@ export class PoolController {
       checks: {
         timestamp: { valid: true, message: '' },
         solBalance: { valid: true, current: 0, required: 0.015, message: '' }, // ~0.01266 SOL + buffer
-        tokenBalance: { valid: true, current: 0, required: params.total_pool_amount, message: '' },
+        tokenBalance: { valid: true, current: 0, required: params.total_pool_amount * 1.005, message: '' },
         treasury: { valid: true, address: '' },
         allocations: { valid: true, total: 0, message: '' },
       },
@@ -180,9 +180,9 @@ export class PoolController {
 
           console.log(`[VALIDATION] Token balance found: ${tokenBalance}`);
 
-          if (tokenBalance < params.total_pool_amount) {
+          if (tokenBalance < params.total_pool_amount * 1.005) {
             result.checks.tokenBalance.valid = false;
-            result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${params.total_pool_amount}, Available: ${tokenBalance}. You can fund the treasury first, or create pool without Streamflow deployment.`;
+            result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${params.total_pool_amount * 1.005} (includes 0.5% fee buffer), Available: ${tokenBalance}. You can fund the treasury first, or create pool without Streamflow deployment.`;
             result.warnings.push(result.checks.tokenBalance.message);
             // Don't set result.valid = false here - allow proceeding without Streamflow
           } else {
@@ -562,7 +562,7 @@ export class PoolController {
               user_wallet: allocation.wallet,
               token_amount: allocation.tokenAmount,
               share_percentage: allocation.percentage,
-              allocation_type: allocation.originalType.toUpperCase(),
+              allocation_type: allocation.originalType.toLowerCase(),
               allocation_value: allocation.originalValue,
               original_percentage: allocation.percentage, // Store for reference
               tier: allocation.tier,
@@ -1207,7 +1207,7 @@ export class PoolController {
         user_wallet: allocation.wallet,
         token_amount: allocation.tokenAmount,
         share_percentage: allocation.percentage,
-        allocation_type: allocation.originalType.toUpperCase(),
+        allocation_type: allocation.originalType.toLowerCase(),
         allocation_value: allocation.originalValue,
         original_percentage: allocation.percentage,
         tier: allocation.tier,
