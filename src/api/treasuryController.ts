@@ -32,6 +32,7 @@ export class TreasuryController {
 
       // Check for project context first
       const projectId = req.projectId || req.query.projectId as string;
+      const poolId = req.query.poolId as string;
 
       // Store project data for later use
       let projectData: { vault_public_key: string; mint_address?: string; symbol?: string } | null = null;
@@ -127,7 +128,7 @@ export class TreasuryController {
 
       // Get all token accounts for this treasury wallet
       let tokens: { symbol: string; balance: number; mint: string }[] = [];
-      
+
       // Add SOL first
       tokens.push({
         symbol: 'SOL',
@@ -164,7 +165,7 @@ export class TreasuryController {
             mint: mintAddress
           };
         }).filter(t => t.balance > 0);
-        
+
         // Add SPL tokens to the list
         tokens = [...tokens, ...spl_tokens];
       } catch (err) {
@@ -180,6 +181,9 @@ export class TreasuryController {
       if (projectId) {
         vestingQuery = vestingQuery.eq('project_id', projectId);
       }
+      if (poolId && poolId !== 'all') {
+        vestingQuery = vestingQuery.eq('id', poolId);
+      }
 
       const { data: activeStreams } = await vestingQuery;
 
@@ -194,6 +198,29 @@ export class TreasuryController {
 
       if (projectId) {
         claimsQuery = claimsQuery.eq('project_id', projectId);
+      }
+
+      // If filtering by pool, we need to filter claims that belong to vestings in this pool
+      if (poolId && poolId !== 'all') {
+        // First get all vesting IDs for this pool
+        const { data: poolVestings } = await this.dbService.supabase
+          .from('vestings')
+          .select('id')
+          .eq('vesting_stream_id', poolId);
+
+        const vestingIds = poolVestings?.map((v: { id: string }) => v.id) || [];
+
+        if (vestingIds.length > 0) {
+          claimsQuery = claimsQuery.in('vesting_id', vestingIds);
+        } else {
+          // If no vestings, then no claims possible for this pool
+          // We can force an empty result by filtering on a non-existent ID or just handling it after
+          // A safe way is to filter by a condition that is always false if we can't modify the query object easily to return empty
+          // Or just let it run with an empty IN clause which might error or return nothing depending on SQL dialect
+          // Supabase/PostgREST handles empty array for .in() by returning error or empty? 
+          // Usually .in('col', []) returns empty set.
+          claimsQuery = claimsQuery.in('vesting_id', [-1]); // Safe fallback
+        }
       }
 
       const { data: claims } = await claimsQuery;
@@ -476,7 +503,7 @@ export class TreasuryController {
       const { amount, recipientAddress, note, tokenMint } = req.body;
 
       if (!projectId) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Project ID required',
           hint: 'Pass projectId in query params, request body, or ensure project context is set'
         });
@@ -595,7 +622,7 @@ export class TreasuryController {
       const { amount, recipientAddress, note } = req.body;
 
       if (!projectId) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           error: 'Project ID required',
           hint: 'Pass projectId in query params, request body, or ensure project context is set'
         });
@@ -663,11 +690,12 @@ export class TreasuryController {
 
       // Log action to admin_actions table
       try {
-        await this.dbService.supabase.from('admin_actions').insert({
-          project_id: projectId,
-          action_type: 'sol_withdrawal',
-          description: `Withdrew ${amount} SOL to ${recipientAddress}${note ? `: ${note}` : ''}`,
-          metadata: {
+        await this.dbService.supabase.from('admin_logs').insert({
+          action: 'sol_withdrawal',
+          admin_wallet: 'System', // Placeholder as we don't have admin wallet in request yet
+          details: {
+            project_id: projectId,
+            description: `Withdrew ${amount} SOL to ${recipientAddress}${note ? `: ${note}` : ''}`,
             amount,
             recipientAddress,
             signature,

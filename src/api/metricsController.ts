@@ -98,7 +98,8 @@ export class MetricsController {
   async getEligibleWalletsEndpoint(req: Request, res: Response) {
     try {
       const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
-      const cacheKey = `eligible_wallets_endpoint_${projectId || 'all'}`;
+      const poolId = req.query.poolId as string;
+      const cacheKey = `eligible_wallets_endpoint_${projectId || 'all'}_${poolId || 'all'}`;
       const cachedData = this.cache.get(cacheKey);
 
       if (cachedData) {
@@ -106,7 +107,7 @@ export class MetricsController {
       }
 
       // SECURITY: Count eligible wallets for this project only
-      const count = await this.getEligibleWalletsCount(projectId);
+      const count = await this.getEligibleWalletsCount(projectId, poolId);
 
       const responseData = {
         count,
@@ -140,14 +141,15 @@ export class MetricsController {
       }
 
       let query = this.dbService.supabase
-        .from('admin_actions')
+        .from('admin_logs')
         .select('*')
         .order('created_at', { ascending: false })
         .limit(Number(limit));
 
-      // SECURITY: Filter by project if provided
+      // SECURITY: Filter by project if provided (using JSON operator)
       if (projectId) {
-        query = query.eq('project_id', projectId);
+        // Use the arrow operator ->> for text extraction from JSONB
+        query = query.eq('details->>project_id', projectId);
       }
 
       const { data, error } = await query;
@@ -177,7 +179,8 @@ export class MetricsController {
   async getClaimHistoryStats(req: Request, res: Response) {
     try {
       const projectId = req.projectId || req.headers['x-project-id'] as string || req.query.projectId as string;
-      const cacheKey = `claim_history_stats_${projectId || 'all'}`;
+      const poolId = req.query.poolId as string;
+      const cacheKey = `claim_history_stats_${projectId || 'all'}_${poolId || 'all'}`;
       const cachedData = this.cache.get(cacheKey);
 
       if (cachedData) {
@@ -186,7 +189,7 @@ export class MetricsController {
 
       // Get claims from last 30 days
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      
+
       let query = this.dbService.supabase
         .from('claim_history')
         .select('amount_claimed, claimed_at')
@@ -198,13 +201,33 @@ export class MetricsController {
         query = query.eq('project_id', projectId);
       }
 
+      // Filter by pool if provided
+      if (poolId && poolId !== 'all') {
+        // Need to filter claims by vesting_id -> vesting_stream_id
+        // This requires a two-step lookup or a join if Supabase supports it via foreign keys
+        // For simplicity, we'll do the two-step lookup here similar to TreasuryController
+
+        const { data: poolVestings } = await this.dbService.supabase
+          .from('vestings')
+          .select('id')
+          .eq('vesting_stream_id', poolId);
+
+        const vestingIds = poolVestings?.map((v: { id: string }) => v.id) || [];
+
+        if (vestingIds.length > 0) {
+          query = query.in('vesting_id', vestingIds);
+        } else {
+          query = query.in('vesting_id', [-1]);
+        }
+      }
+
       const { data, error } = await query;
 
       if (error) throw error;
 
       // Aggregate by day
       const claimsByDay = new Map<string, number>();
-      
+
       // Initialize last 30 days with 0
       for (let i = 0; i < 30; i++) {
         const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
@@ -215,7 +238,7 @@ export class MetricsController {
       data?.forEach((claim: any) => {
         const dateStr = new Date(claim.claimed_at).toISOString().split('T')[0];
         const amount = Number(claim.amount_claimed) / 1e9;
-        
+
         if (claimsByDay.has(dateStr)) {
           claimsByDay.set(dateStr, (claimsByDay.get(dateStr) || 0) + amount);
         }
@@ -273,7 +296,7 @@ export class MetricsController {
    * Helper: Get eligible wallets count
    * SECURITY: Should filter by project
    */
-  private async getEligibleWalletsCount(projectId?: string): Promise<number> {
+  private async getEligibleWalletsCount(projectId?: string, poolId?: string): Promise<number> {
     try {
       // SECURITY: Count active vesting records for this project
       let query = this.dbService.supabase
@@ -284,6 +307,10 @@ export class MetricsController {
 
       if (projectId) {
         query = query.eq('project_id', projectId);
+      }
+
+      if (poolId && poolId !== 'all') {
+        query = query.eq('vesting_stream_id', poolId);
       }
 
       const { count } = await query;
