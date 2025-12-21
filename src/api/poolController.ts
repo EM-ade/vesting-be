@@ -164,7 +164,7 @@ export class PoolController {
 
       if (tokenMintToCheck) {
         try {
-          const { getAssociatedTokenAddress } = await import('@solana/spl-token');
+          const { getAssociatedTokenAddress, getMint } = await import('@solana/spl-token');
           const treasuryTokenAccount = await getAssociatedTokenAddress(
             tokenMintToCheck,
             adminKeypair.publicKey
@@ -174,15 +174,25 @@ export class PoolController {
           console.log(`[VALIDATION] Treasury: ${adminKeypair.publicKey.toBase58()}`);
           console.log(`[VALIDATION] Token account (ATA): ${treasuryTokenAccount.toBase58()}`);
 
+          // Get Mint Info for decimals
+          const mintInfo = await getMint(this.connection, tokenMintToCheck);
+          const decimals = mintInfo.decimals;
+
           const tokenAccountInfo = await getAccount(this.connection, treasuryTokenAccount);
-          const tokenBalance = Number(tokenAccountInfo.amount) / 1e9;
+          const tokenBalance = Number(tokenAccountInfo.amount) / Math.pow(10, decimals);
           result.checks.tokenBalance.current = tokenBalance;
 
-          console.log(`[VALIDATION] Token balance found: ${tokenBalance}`);
+          console.log(`[VALIDATION] Token balance found: ${tokenBalance} (Decimals: ${decimals})`);
 
-          if (tokenBalance < params.total_pool_amount * 1.005) {
+          // Use integer comparison to avoid floating point issues
+          // Required: Pool Amount + 0.5% buffer
+          const requiredAmount = params.total_pool_amount * 1.005;
+          const requiredBaseUnits = BigInt(Math.ceil(requiredAmount * Math.pow(10, decimals)));
+          const currentBaseUnits = tokenAccountInfo.amount;
+
+          if (currentBaseUnits < requiredBaseUnits) {
             result.checks.tokenBalance.valid = false;
-            result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${params.total_pool_amount * 1.005} (includes 0.5% fee buffer), Available: ${tokenBalance}. You can fund the treasury first, or create pool without Streamflow deployment.`;
+            result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${requiredAmount.toFixed(4)} (includes 0.5% fee buffer), Available: ${tokenBalance.toFixed(4)}. You can fund the treasury first, or create pool without Streamflow deployment.`;
             result.warnings.push(result.checks.tokenBalance.message);
             // Don't set result.valid = false here - allow proceeding without Streamflow
           } else {
@@ -406,6 +416,7 @@ export class PoolController {
         rules, // Array of eligibility rules from frontend
         manual_allocations, // Array of {wallet, amount, tier?, note?} for manual mode
         skipStreamflow, // Optional: skip Streamflow deployment
+        claim_fee_lamports, // Optional: per-pool claim fee
       } = req.body;
 
       if (!name || !total_pool_amount || vesting_duration_days === undefined) {
@@ -512,6 +523,7 @@ export class PoolController {
           nft_requirements: nftRequirements,
           tier_allocations: {}, // Empty object for now
           grace_period_days: 30,
+          claim_fee_lamports: claim_fee_lamports !== undefined ? claim_fee_lamports : 1000000, // Default 0.001 SOL if not provided
         })
         .select()
         .single();

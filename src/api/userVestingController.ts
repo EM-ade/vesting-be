@@ -11,6 +11,8 @@ import { config } from '../config';
 import { cache } from '../lib/cache';
 import Decimal from 'decimal.js';
 import { EligibilityService } from '../services/eligibilityService';
+// PLATFORM_WALLET will be loaded lazily when needed to avoid env loading issues
+
 
 /**
  * User Vesting API Controller
@@ -622,11 +624,6 @@ export class UserVestingController {
       console.log(`[CLAIM] Total available: ${roundedTotalAvailable}, claiming: ${actualClaimAmount}`);
       console.log(`[CLAIM] Pool breakdown:`, poolBreakdown);
 
-      // Get claim fee from config or project context
-      let feeInLamports: number;
-      let feeWalletPubkey: PublicKey;
-      let claimFeeUsd = 0;
-      let feeInSol = 0;
       let project = req.project;
 
       // If project context is missing, try to derive it from the vestings
@@ -651,35 +648,35 @@ export class UserVestingController {
         }
       }
 
-      if (project) {
-        // 1. Try to get global claim fee (USD) from config
-        try {
-          const globalConfig = await this.dbService.getConfig();
-          if (globalConfig && globalConfig.claim_fee_usd !== undefined) {
-            claimFeeUsd = Number(globalConfig.claim_fee_usd);
-            const { solAmount } = await this.priceService.calculateSolFee(claimFeeUsd);
-            feeInSol = solAmount;
-            feeInLamports = Math.floor(feeInSol * LAMPORTS_PER_SOL);
-          } else {
-            feeInLamports = Number(project.claim_fee_lamports || 1000000); // Default 0.001 SOL
-            feeInSol = feeInLamports / LAMPORTS_PER_SOL;
-          }
-        } catch (err) {
-          feeInLamports = Number(project.claim_fee_lamports || 1000000);
-          feeInSol = feeInLamports / LAMPORTS_PER_SOL;
-        }
-
-        if (project.fee_recipient_address) {
-          feeWalletPubkey = new PublicKey(project.fee_recipient_address);
-        } else if (project.vault_public_key) {
-          feeWalletPubkey = new PublicKey(project.vault_public_key);
-        } else {
-          feeWalletPubkey = config.feeWallet || new PublicKey('11111111111111111111111111111111');
-        }
-      } else {
+      if (!project) {
         return res.status(500).json({
           error: 'Unable to determine project context for claim. Please contact support.',
         });
+      }
+
+      // Calculate total claim fee by summing fees from all involved pools
+      let feeInLamports = 0;
+      let feeInSol = 0;
+
+      for (const poolData of poolsWithAvailable) {
+        // Use per-pool fee if available, otherwise default to 0.001 SOL (1000000 lamports)
+        // Note: DB column is claim_fee_lamports
+        const poolFee = Number(poolData.stream.claim_fee_lamports !== undefined ? poolData.stream.claim_fee_lamports : 1000000);
+        feeInLamports += poolFee;
+      }
+
+      feeInSol = feeInLamports / LAMPORTS_PER_SOL;
+
+      console.log(`[CLAIM] Total fee calculated: ${feeInSol} SOL (${feeInLamports} lamports) from ${poolsWithAvailable.length} pools`);
+
+      // Determine fee wallet (Project or Global)
+      let feeWalletPubkey: PublicKey;
+      if (project && project.fee_recipient_address) {
+        feeWalletPubkey = new PublicKey(project.fee_recipient_address);
+      } else if (project && project.vault_public_key) {
+        feeWalletPubkey = new PublicKey(project.vault_public_key);
+      } else {
+        feeWalletPubkey = config.feeWallet || new PublicKey('11111111111111111111111111111111');
       }
 
       const userPublicKey = new PublicKey(userWallet);
@@ -725,14 +722,61 @@ export class UserVestingController {
       // 5. Build Instructions
       const instructions = [];
 
-      // A. Claim Fee (User -> Treasury)
-      instructions.push(
-        SystemProgram.transfer({
-          fromPubkey: userPublicKey,
-          toPubkey: feeWalletPubkey,
-          lamports: feeInLamports,
-        })
-      );
+      // A. Claim Fees
+      // 1. Project Fee (Sum of per-pool fees)
+      // This goes to the project's fee recipient or vault
+      const projectFee = feeInLamports; // feeInLamports is the sum of pool.claim_fee_lamports calculated above
+
+      if (projectFee > 0) {
+        instructions.push(
+          SystemProgram.transfer({
+            fromPubkey: userPublicKey,
+            toPubkey: feeWalletPubkey,
+            lamports: projectFee,
+          })
+        );
+      }
+
+      // 2. Platform Fee (Global Fixed Fee)
+      // This goes to the Platform Wallet
+      try {
+        const platformFeeUsd = Number(process.env.PLATFORM_CLAIM_FEE_USD || 0.5);
+        if (platformFeeUsd > 0) {
+          const { solAmount } = await this.priceService.calculateSolFee(platformFeeUsd);
+          const platformFeeLamports = Math.floor(solAmount * LAMPORTS_PER_SOL);
+
+          if (platformFeeLamports > 0) {
+            const platformWalletAddress = process.env.PLATFORM_WALLET || 'ABjnax7QfDmG6wR2KJoNc3UyiouwTEZ3b5tnTrLLyNSp';
+            const platformWallet = new PublicKey(platformWalletAddress);
+
+            instructions.push(
+              SystemProgram.transfer({
+                fromPubkey: userPublicKey,
+                toPubkey: platformWallet,
+                lamports: platformFeeLamports,
+              })
+            );
+            console.log(`[CLAIM] Added Platform Fee: ${platformFeeLamports} lamports ($${platformFeeUsd}) to ${platformWalletAddress}`);
+          }
+        }
+      } catch (err) {
+        console.error('[CLAIM] Failed to calculate/add platform fee:', err);
+        // Continue without platform fee if price service fails? Or fail transaction?
+        // For now, log error and continue, or maybe fallback to a hardcoded SOL amount?
+        // Let's fallback to 0.002 SOL (~$0.30-$0.50 depending on price) if price service fails to be safe
+        const fallbackFee = 0.002 * LAMPORTS_PER_SOL;
+        const platformWalletAddress = process.env.PLATFORM_WALLET || 'ABjnax7QfDmG6wR2KJoNc3UyiouwTEZ3b5tnTrLLyNSp';
+        const platformWallet = new PublicKey(platformWalletAddress);
+
+        instructions.push(
+          SystemProgram.transfer({
+            fromPubkey: userPublicKey,
+            toPubkey: platformWallet,
+            lamports: fallbackFee,
+          })
+        );
+        console.log(`[CLAIM] Added Fallback Platform Fee: ${fallbackFee} lamports to ${platformWalletAddress}`);
+      }
 
       // B. Create ATA (if needed) - User pays rent
       if (!userTokenAccountExists) {

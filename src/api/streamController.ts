@@ -45,9 +45,23 @@ export class StreamController {
         return res.status(400).json({ error: 'adminWallet, signature, and message are required' });
       }
 
-      // Verify admin authorization
-      const dbConfig = await this.dbService.getConfig();
-      if (!dbConfig || dbConfig.admin_wallet !== adminWallet) {
+      // Verify admin authorization for the project
+      // Get project ID from request
+      const projectId = req.headers['x-project-id'] as string || req.body.projectId;
+
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // Check if the wallet has admin/owner access to this project
+      const { data: access } = await this.dbService.supabase
+        .from('user_project_access')
+        .select('role')
+        .eq('project_id', projectId)
+        .eq('wallet_address', adminWallet)
+        .single();
+
+      if (!access || (access.role !== 'admin' && access.role !== 'owner')) {
         return res.status(403).json({ error: 'Not authorized - not an admin wallet' });
       }
 
@@ -73,7 +87,7 @@ export class StreamController {
         const timestamp = messageData.timestamp;
         const now = Date.now();
         const fiveMinutes = 5 * 60 * 1000;
-        
+
         if (!timestamp || Math.abs(now - timestamp) > fiveMinutes) {
           return res.status(401).json({ error: 'Signature expired' });
         }
@@ -85,7 +99,7 @@ export class StreamController {
       const { data: streams, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
-        .eq('status', 'active') as { data: VestingStream[] | null; error: any };
+        .eq('is_active', true)
 
       if (fetchError) {
         throw new Error(`Failed to fetch streams: ${fetchError.message}`);
@@ -100,10 +114,10 @@ export class StreamController {
       }
 
       // Mark all streams as paused in database
-      const streamIds = streams.map((s) => s.id);
+      const streamIds = streams.map((s: VestingStream) => s.id);
       const { error: updateError } = await this.dbService.supabase
         .from('vesting_streams')
-        .update({ status: 'paused', paused_at: new Date().toISOString() })
+        .update({ is_active: false, state: 'paused' })
         .in('id', streamIds);
 
       if (updateError) {
@@ -146,9 +160,22 @@ export class StreamController {
         });
       }
 
-      // Verify admin authorization
-      const dbConfig = await this.dbService.getConfig();
-      if (!dbConfig || dbConfig.admin_wallet !== adminWallet) {
+      // Verify admin authorization for the project
+      const projectId = req.headers['x-project-id'] as string || req.body.projectId;
+
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // Check if the wallet has admin/owner access to this project
+      const { data: access } = await this.dbService.supabase
+        .from('user_project_access')
+        .select('role')
+        .eq('project_id', projectId)
+        .eq('wallet_address', adminWallet)
+        .single();
+
+      if (!access || (access.role !== 'admin' && access.role !== 'owner')) {
         return res.status(403).json({ error: 'Not authorized - not an admin wallet' });
       }
 
@@ -173,7 +200,7 @@ export class StreamController {
         const timestamp = messageData.timestamp;
         const now = Date.now();
         const fiveMinutes = 5 * 60 * 1000;
-        
+
         if (!timestamp || Math.abs(now - timestamp) > fiveMinutes) {
           return res.status(401).json({ error: 'Signature expired' });
         }
@@ -185,7 +212,7 @@ export class StreamController {
       const { data: streams, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
-        .eq('status', 'active') as { data: VestingStream[] | null; error: any };
+        .eq('is_active', true) as { data: VestingStream[] | null; error: any };
 
       if (fetchError) {
         throw new Error(`Failed to fetch streams: ${fetchError.message}`);
@@ -271,9 +298,22 @@ export class StreamController {
         return res.status(400).json({ error: 'adminWallet, signature, and message are required' });
       }
 
-      // Verify admin authorization
-      const dbConfig = await this.dbService.getConfig();
-      if (!dbConfig || dbConfig.admin_wallet !== adminWallet) {
+      // Verify admin authorization for the project
+      const projectId = req.headers['x-project-id'] as string || req.body.projectId;
+
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+
+      // Check if the wallet has admin/owner access to this project
+      const { data: access } = await this.dbService.supabase
+        .from('user_project_access')
+        .select('role')
+        .eq('project_id', projectId)
+        .eq('wallet_address', adminWallet)
+        .single();
+
+      if (!access || (access.role !== 'admin' && access.role !== 'owner')) {
         return res.status(403).json({ error: 'Not authorized - not an admin wallet' });
       }
 
@@ -298,7 +338,7 @@ export class StreamController {
         const timestamp = messageData.timestamp;
         const now = Date.now();
         const fiveMinutes = 5 * 60 * 1000;
-        
+
         if (!timestamp || Math.abs(now - timestamp) > fiveMinutes) {
           return res.status(401).json({ error: 'Signature expired' });
         }
@@ -310,7 +350,7 @@ export class StreamController {
       const { data: streams, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
-        .eq('status', 'paused') as { data: VestingStream[] | null; error: any };
+        .eq('is_active', false)
 
       if (fetchError) {
         throw new Error(`Failed to fetch streams: ${fetchError.message}`);
@@ -325,10 +365,10 @@ export class StreamController {
       }
 
       // Mark all streams as active in database
-      const streamIds = streams.map((s) => s.id);
+      const streamIds = streams.map((s: VestingStream) => s.id);
       const { error: updateError } = await this.dbService.supabase
         .from('vesting_streams')
-        .update({ status: 'active', resumed_at: new Date().toISOString() })
+        .update({ is_active: true, state: 'active' })
         .in('id', streamIds);
 
       if (updateError) {
