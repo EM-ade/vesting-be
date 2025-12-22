@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .env
+.env.prod
+.env.test
 *.log
 coverage/
 tests/test-wallet.json
