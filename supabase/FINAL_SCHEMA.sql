@@ -59,13 +59,15 @@ CREATE TABLE vesting_streams (
   start_time TIMESTAMPTZ,
   end_time TIMESTAMPTZ,
   snapshot_date TIMESTAMPTZ,
+  claim_fee_lamports BIGINT NOT NULL DEFAULT 1000000,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT positive_amounts CHECK (
     total_pool_amount > 0 AND
     vesting_duration_days > 0 AND
     cliff_duration_days >= 0 AND
-    grace_period_days >= 0
+    grace_period_days >= 0 AND
+    claim_fee_lamports >= 0
   ),
   CONSTRAINT valid_vesting_mode CHECK (vesting_mode IN ('snapshot', 'dynamic'))
 );

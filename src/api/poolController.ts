@@ -163,48 +163,76 @@ export class PoolController {
         : config.customTokenMint;
 
       if (tokenMintToCheck) {
-        try {
-          const { getAssociatedTokenAddress } = await import('@solana/spl-token');
-          const treasuryTokenAccount = await getAssociatedTokenAddress(
-            tokenMintToCheck,
-            adminKeypair.publicKey
-          );
+        // Check if this is native SOL (wrapped SOL)
+        const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
+        const isNativeSOL = tokenMintToCheck.toBase58() === NATIVE_SOL_MINT;
 
-          console.log(`[VALIDATION] Checking token balance for mint: ${tokenMintToCheck.toBase58()}`);
-          console.log(`[VALIDATION] Treasury: ${adminKeypair.publicKey.toBase58()}`);
-          console.log(`[VALIDATION] Token account (ATA): ${treasuryTokenAccount.toBase58()}`);
+        if (isNativeSOL) {
+          // For native SOL, check the wallet's SOL balance directly (no token account needed)
+          console.log(`[VALIDATION] Checking native SOL balance for treasury`);
+          const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
+          const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
+          result.checks.tokenBalance.current = solBalanceInSOL;
 
-          const tokenAccountInfo = await getAccount(this.connection, treasuryTokenAccount);
-          const tokenBalance = Number(tokenAccountInfo.amount) / 1e9;
-          result.checks.tokenBalance.current = tokenBalance;
+          console.log(`[VALIDATION] Native SOL balance: ${solBalanceInSOL} SOL`);
 
-          console.log(`[VALIDATION] Token balance found: ${tokenBalance}`);
+          // For native SOL pools, we need:
+          // 1. Pool amount + 0.5% buffer (will be locked in Streamflow)
+          // 2. 0.015 SOL extra (stays in vault for Streamflow rent/fees)
+          const requiredSOL = (params.total_pool_amount * 1.005) + 0.015;
 
-          if (tokenBalance < params.total_pool_amount * 1.005) {
+          if (solBalanceInSOL < requiredSOL) {
             result.checks.tokenBalance.valid = false;
-            result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${params.total_pool_amount * 1.005} (includes 0.5% fee buffer), Available: ${tokenBalance}. You can fund the treasury first, or create pool without Streamflow deployment.`;
-            result.warnings.push(result.checks.tokenBalance.message);
-            // Don't set result.valid = false here - allow proceeding without Streamflow
-          } else {
-            result.checks.tokenBalance.message = `Token balance sufficient: ${tokenBalance}`;
-          }
-        } catch (err) {
-          // Token account doesn't exist yet - this is OK if user will fund it or skip Streamflow
-          console.error(`[VALIDATION] Token account check failed:`, err);
-          const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-
-          // Check if it's just a missing account (which is fine - user will fund it)
-          if (errorMsg.includes('could not find account') || errorMsg.includes('Invalid param: could not find account') || err instanceof TokenAccountNotFoundError) {
-            result.checks.tokenBalance.valid = false;
-            result.checks.tokenBalance.current = 0;
-            result.checks.tokenBalance.message = `Treasury token account not yet created. The UI will create it and fund it when you create the pool (user pays ~0.002 SOL rent + tokens).`;
+            result.checks.tokenBalance.message = `Insufficient SOL in treasury. Required: ${requiredSOL.toFixed(4)} SOL (${params.total_pool_amount} pool + 0.5% buffer + 0.015 extra for Streamflow deployment), Available: ${solBalanceInSOL.toFixed(4)} SOL. The UI will prompt you to fund the treasury.`;
             result.warnings.push(result.checks.tokenBalance.message);
           } else {
-            result.checks.tokenBalance.valid = false;
-            result.checks.tokenBalance.message = `Error checking token balance: ${errorMsg}`;
-            result.errors.push(result.checks.tokenBalance.message);
+            result.checks.tokenBalance.message = `Native SOL balance sufficient: ${solBalanceInSOL} SOL`;
           }
-          // Don't set result.valid = false - allow proceeding (user will fund in the transaction)
+        } else {
+          // SPL Token - check token account
+          try {
+            const { getAssociatedTokenAddress } = await import('@solana/spl-token');
+            const treasuryTokenAccount = await getAssociatedTokenAddress(
+              tokenMintToCheck,
+              adminKeypair.publicKey
+            );
+
+            console.log(`[VALIDATION] Checking token balance for mint: ${tokenMintToCheck.toBase58()}`);
+            console.log(`[VALIDATION] Treasury: ${adminKeypair.publicKey.toBase58()}`);
+            console.log(`[VALIDATION] Token account (ATA): ${treasuryTokenAccount.toBase58()}`);
+
+            const tokenAccountInfo = await getAccount(this.connection, treasuryTokenAccount);
+            const tokenBalance = Number(tokenAccountInfo.amount) / 1e9;
+            result.checks.tokenBalance.current = tokenBalance;
+
+            console.log(`[VALIDATION] Token balance found: ${tokenBalance}`);
+
+            if (tokenBalance < params.total_pool_amount * 1.005) {
+              result.checks.tokenBalance.valid = false;
+              result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${params.total_pool_amount * 1.005} (pool + 0.25% Streamflow fee + 0.25% buffer), Available: ${tokenBalance}. You can fund the treasury first, or create pool without Streamflow deployment.`;
+              result.warnings.push(result.checks.tokenBalance.message);
+              // Don't set result.valid = false here - allow proceeding without Streamflow
+            } else {
+              result.checks.tokenBalance.message = `Token balance sufficient: ${tokenBalance}`;
+            }
+          } catch (err) {
+            // Token account doesn't exist yet - this is OK if user will fund it or skip Streamflow
+            console.error(`[VALIDATION] Token account check failed:`, err);
+            const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+
+            // Check if it's just a missing account (which is fine - user will fund it)
+            if (errorMsg.includes('could not find account') || errorMsg.includes('Invalid param: could not find account') || err instanceof TokenAccountNotFoundError) {
+              result.checks.tokenBalance.valid = false;
+              result.checks.tokenBalance.current = 0;
+              result.checks.tokenBalance.message = `Treasury token account not yet created. The UI will create it and fund it when you create the pool (user pays ~0.002 SOL rent + tokens).`;
+              result.warnings.push(result.checks.tokenBalance.message);
+            } else {
+              result.checks.tokenBalance.valid = false;
+              result.checks.tokenBalance.message = `Error checking token balance: ${errorMsg}`;
+              result.errors.push(result.checks.tokenBalance.message);
+            }
+            // Don't set result.valid = false - allow proceeding (user will fund in the transaction)
+          }
         }
       } else {
         // No token mint configured - this is OK for testing/manual setup
@@ -406,6 +434,7 @@ export class PoolController {
         rules, // Array of eligibility rules from frontend
         manual_allocations, // Array of {wallet, amount, tier?, note?} for manual mode
         skipStreamflow, // Optional: skip Streamflow deployment
+        claim_fee_lamports, // Pool-specific claim fee in lamports
       } = req.body;
 
       if (!name || !total_pool_amount || vesting_duration_days === undefined) {
@@ -442,15 +471,15 @@ export class PoolController {
 
       // If validation fails and not skipping Streamflow, return error with options
       if (!validation.valid && !skipStreamflow) {
-        // Check if it's ONLY token balance issue (which is OK - user will fund it in the UI)
-        const onlyTokenIssue = !validation.checks.solBalance.valid === false &&
-          !validation.checks.tokenBalance.valid &&
+        // Check if it's ONLY funding issues (SOL/tokens) - which is OK, user will fund it in the UI
+        const onlyFundingIssues = (!validation.checks.solBalance.valid || !validation.checks.tokenBalance.valid) &&
           validation.checks.treasury.valid &&
-          validation.checks.allocations.valid;
+          validation.checks.allocations.valid &&
+          validation.checks.timestamp.valid;
 
-        // If only token balance is the issue, allow proceeding (UI handles the funding)
-        if (onlyTokenIssue) {
-          console.log('[VALIDATION] Only token balance issue - allowing to proceed (UI will handle funding)');
+        // If only funding issues, allow proceeding (UI handles the funding)
+        if (onlyFundingIssues) {
+          console.log('[VALIDATION] Only funding issues (SOL/tokens) - allowing to proceed (UI will handle funding)');
           // Continue to pool creation - don't return error
         } else {
           return res.status(400).json({
@@ -466,8 +495,8 @@ export class PoolController {
             suggestions: [
               ...(!validation.checks.solBalance.valid ? [`Fund treasury wallet (${validation.checks.treasury.address}) with at least 0.015 SOL`] : []),
               ...(!validation.checks.tokenBalance.valid && validation.checks.tokenBalance.current > 0 ? [
-                `Treasury wallet has ${validation.checks.tokenBalance.current} tokens but needs ${total_pool_amount}`,
-                `Transfer ${total_pool_amount - validation.checks.tokenBalance.current} more tokens, or`,
+                `Treasury wallet has ${validation.checks.tokenBalance.current} tokens but needs ${total_pool_amount * 1.005} (includes 0.5% Streamflow fee buffer)`,
+                `Transfer ${(total_pool_amount * 1.005) - validation.checks.tokenBalance.current} more tokens, or`,
                 `Enable "Skip Streamflow Deployment" to create a database-only pool`
               ] : []),
               ...(validation.checks.allocations.valid === false ? ['Fix allocation errors before proceeding'] : []),
@@ -491,6 +520,18 @@ export class PoolController {
         enabled: rule.enabled !== false, // Default to true
       })) : [];
 
+      // Get token_mint from request body - REQUIRED, no fallback
+      const poolTokenMint = req.body.token_mint;
+      
+      if (!poolTokenMint) {
+        return res.status(400).json({
+          error: 'token_mint is required',
+          message: 'You must select a token when creating a pool. Please select a token from the dropdown in Step 1.',
+        });
+      }
+      
+      console.log(`[POOL CREATION] Using token_mint: ${poolTokenMint}`);
+
       const { data: stream, error } = await this.dbService.supabase
         .from('vesting_streams')
         .insert({
@@ -512,6 +553,8 @@ export class PoolController {
           nft_requirements: nftRequirements,
           tier_allocations: {}, // Empty object for now
           grace_period_days: 30,
+          claim_fee_lamports: claim_fee_lamports !== undefined ? claim_fee_lamports : 1000000, // Default 0.001 SOL
+          token_mint: poolTokenMint, // Add token mint from request or project
         })
         .select()
         .single();
@@ -641,6 +684,65 @@ export class PoolController {
           } catch (ataError) {
             console.error('[POOL] Failed to ensure admin ATA exists:', ataError);
             // We continue, as it might already exist or Streamflow might handle it (though unlikely if it failed before)
+          }
+
+          // PRE-DEPLOYMENT VERIFICATION: Check treasury has sufficient funds
+          console.log('[STREAMFLOW] Verifying treasury has sufficient funds before deployment...');
+          
+          const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
+          const isNativeSOL = tokenMint.toBase58() === NATIVE_SOL_MINT;
+          
+          if (isNativeSOL) {
+            // For native SOL, check SOL balance
+            const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
+            const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
+            const requiredSOL = (total_pool_amount * 1.005) + 0.015;
+            
+            console.log(`[STREAMFLOW] Native SOL pool - Treasury balance: ${solBalanceInSOL.toFixed(4)} SOL`);
+            console.log(`[STREAMFLOW] Required: ${requiredSOL.toFixed(4)} SOL (${total_pool_amount} pool + 0.5% buffer + 0.015 deployment fees)`);
+            
+            if (solBalanceInSOL < requiredSOL) {
+              throw new Error(`Treasury has insufficient SOL. Required: ${requiredSOL.toFixed(4)} SOL, Available: ${solBalanceInSOL.toFixed(4)} SOL. Please fund the treasury before deploying.`);
+            }
+            console.log('[STREAMFLOW] ✅ Treasury has sufficient SOL for deployment');
+          } else {
+            // For SPL tokens, check both token balance and SOL for fees
+            const { getAssociatedTokenAddress, getAccount } = await import('@solana/spl-token');
+            
+            const treasuryTokenAccount = await getAssociatedTokenAddress(
+              tokenMint,
+              adminKeypair.publicKey
+            );
+            
+            try {
+              const tokenAccountInfo = await getAccount(this.connection, treasuryTokenAccount);
+              const tokenBalance = Number(tokenAccountInfo.amount) / 1e9;
+              const requiredTokens = total_pool_amount * 1.005;
+              
+              console.log(`[STREAMFLOW] SPL Token - Treasury token balance: ${tokenBalance}`);
+              console.log(`[STREAMFLOW] Required tokens: ${requiredTokens} (${total_pool_amount} pool + 0.5% buffer)`);
+              
+              if (tokenBalance < requiredTokens) {
+                throw new Error(`Treasury has insufficient tokens. Required: ${requiredTokens}, Available: ${tokenBalance}. Please fund the treasury before deploying.`);
+              }
+              console.log('[STREAMFLOW] ✅ Treasury has sufficient tokens');
+            } catch (err) {
+              if (err instanceof Error && err.message.includes('could not find account')) {
+                throw new Error(`Treasury token account does not exist. Please create and fund the token account before deploying.`);
+              }
+              throw err;
+            }
+            
+            // Also check SOL for deployment fees
+            const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
+            const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
+            
+            console.log(`[STREAMFLOW] Treasury SOL balance: ${solBalanceInSOL.toFixed(4)} SOL`);
+            
+            if (solBalanceInSOL < 0.015) {
+              throw new Error(`Treasury has insufficient SOL for deployment fees. Required: 0.015 SOL, Available: ${solBalanceInSOL.toFixed(4)} SOL. Please fund the treasury before deploying.`);
+            }
+            console.log('[STREAMFLOW] ✅ Treasury has sufficient SOL for deployment fees');
           }
 
           const startTimestamp = Math.floor(new Date(stream.start_time).getTime() / 1000);

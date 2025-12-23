@@ -1,5 +1,5 @@
-import { Request, Response, NextFunction } from 'express';
-import { getSupabaseClient } from '../lib/supabaseClient';
+import { Request, Response, NextFunction } from "express";
+import { getSupabaseClient } from "../lib/supabaseClient";
 
 // Extend Express Request to include project data
 declare global {
@@ -12,11 +12,16 @@ declare global {
   }
 }
 
-export const projectContextMiddleware = async (req: Request, res: Response, next: NextFunction) => {
+export const projectContextMiddleware = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
   // Allow public routes or admin routes that might not have project context yet
   // But if x-project-id is present, we try to load it.
-  const projectId = (req.headers['x-project-id'] as string) || (req.query.projectId as string);
-  
+  const projectId =
+    (req.headers["x-project-id"] as string) || (req.query.projectId as string);
+
   if (!projectId) {
     // If no project ID, we just continue. Some routes might not need it.
     // Routes that strictly require it should check if req.projectId is set.
@@ -26,15 +31,15 @@ export const projectContextMiddleware = async (req: Request, res: Response, next
   try {
     const supabase = getSupabaseClient();
     const { data: project, error } = await supabase
-      .from('projects')
-      .select('*')
-      .eq('id', projectId)
+      .from("projects")
+      .select("*")
+      .eq("id", projectId)
       .single();
 
     if (error || !project) {
       // If project ID was provided but invalid, we should probably error out?
       // Or just ignore? Safer to error if client explicitly sent a project ID.
-      return res.status(404).json({ error: 'Project not found' });
+      return res.status(404).json({ error: "Project not found" });
     }
 
     req.project = project;
@@ -61,7 +66,7 @@ export const projectContextMiddleware = async (req: Request, res: Response, next
 
     next();
   } catch (error) {
-    console.error('Project context error:', error);
-    res.status(500).json({ error: 'Invalid project context' });
+    console.error("Project context error:", error);
+    res.status(500).json({ error: "Invalid project context" });
   }
 };

@@ -1,5 +1,5 @@
-import { Request, Response, NextFunction } from 'express';
-import { z, ZodError } from 'zod';
+import { Request, Response, NextFunction } from "express";
+import { z, ZodError } from "zod";
 
 export function validate(schema: z.ZodSchema<any>) {
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -9,9 +9,9 @@ export function validate(schema: z.ZodSchema<any>) {
     } catch (error) {
       if (error instanceof ZodError) {
         return res.status(400).json({
-          error: 'Validation error',
+          error: "Validation error",
           details: error.issues.map((e: any) => ({
-            path: e.path.join('.'),
+            path: e.path.join("."),
             message: e.message,
           })),
         });
@@ -23,7 +23,9 @@ export function validate(schema: z.ZodSchema<any>) {
 
 // Common schemas
 export const schemas = {
-  wallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/, 'Invalid Solana wallet address'),
+  wallet: z
+    .string()
+    .regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/, "Invalid Solana wallet address"),
 
   createPool: z.object({
     name: z.string().min(3).max(50),
@@ -32,12 +34,41 @@ export const schemas = {
     vesting_duration_days: z.number().positive(),
     cliff_duration_days: z.number().min(0).optional(),
     start_time: z.string().datetime().optional(),
-    vesting_mode: z.enum(['snapshot', 'dynamic', 'manual']),
+    vesting_mode: z.enum(["snapshot", "dynamic", "manual"]),
     adminWallet: z.string().optional(), // Sometimes passed for logging
   }),
 
   claimVesting: z.object({
-    userWallet: z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/, 'Invalid Solana wallet address'),
+    userWallet: z
+      .string()
+      .regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/, "Invalid Solana wallet address"),
     amountToClaim: z.number().positive().optional(),
+  }),
+
+  updatePool: z.object({
+    name: z.string().min(3).max(50).optional(),
+    description: z.string().optional(),
+    // We limit what can be updated to prevent changing core pool logic after creation
+  }),
+
+  updateAllocations: z.object({
+    allocations: z
+      .array(
+        z.object({
+          wallet: z
+            .string()
+            .regex(
+              /^[1-9A-HJ-NP-Za-km-z]{32,44}$/,
+              "Invalid Solana wallet address"
+            ),
+          allocationType: z
+            .enum(["percentage", "fixed", "PERCENTAGE", "FIXED"])
+            .optional(),
+          allocationValue: z.number().nonnegative(),
+          note: z.string().optional(),
+          tier: z.number().int().min(1).optional(),
+        })
+      )
+      .min(1, "Allocations array cannot be empty"),
   }),
 };

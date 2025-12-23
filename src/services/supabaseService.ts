@@ -1,20 +1,20 @@
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey } from "@solana/web3.js";
 
 /**
  * Supabase Service
- * 
+ *
  * This is a TypeScript interface for the Supabase database.
  * Install: npm install @supabase/supabase-js
- * 
+ *
  * Usage:
  * import { createClient } from '@supabase/supabase-js';
  * import { SupabaseService } from './services/supabaseService';
- * 
+ *
  * const supabase = createClient(
  *   process.env.SUPABASE_URL!,
  *   process.env.SUPABASE_SERVICE_ROLE_KEY!
  * );
- * 
+ *
  * const dbService = new SupabaseService(supabase);
  */
 
@@ -67,6 +67,7 @@ export interface DatabaseClaimHistory {
   id: string;
   user_wallet: string;
   vesting_id: string;
+  project_id: string;
   amount_claimed: number;
   fee_paid: number;
   transaction_signature: string;
@@ -115,6 +116,7 @@ export interface UpdateVestingInput {
 export interface CreateClaimInput {
   user_wallet: string;
   vesting_id: string;
+  project_id: string;
   amount_claimed: number;
   fee_paid: number;
   transaction_signature: string;
@@ -131,7 +133,7 @@ export interface LogAdminActionInput {
 
 /**
  * Supabase Service Class
- * 
+ *
  * Note: This is a template. You need to install @supabase/supabase-js
  * and pass a Supabase client instance to use this service.
  */
@@ -152,33 +154,43 @@ export class SupabaseService {
     delayMs = 1000
   ): Promise<{ data: T; error: any }> {
     let lastError: any;
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const result = await operation();
-        
+
         // If successful or non-retryable error, return immediately
         if (!result.error || !this.isRetryableError(result.error)) {
           return result;
         }
-        
+
         lastError = result.error;
-        console.warn(`Supabase operation failed (attempt ${attempt}/${maxRetries}):`, result.error.message);
-        
+        console.warn(
+          `Supabase operation failed (attempt ${attempt}/${maxRetries}):`,
+          result.error.message
+        );
+
         // Wait before retrying (exponential backoff)
         if (attempt < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, delayMs * attempt));
+          await new Promise((resolve) =>
+            setTimeout(resolve, delayMs * attempt)
+          );
         }
       } catch (err) {
         lastError = err;
-        console.warn(`Supabase operation threw error (attempt ${attempt}/${maxRetries}):`, err);
-        
+        console.warn(
+          `Supabase operation threw error (attempt ${attempt}/${maxRetries}):`,
+          err
+        );
+
         if (attempt < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, delayMs * attempt));
+          await new Promise((resolve) =>
+            setTimeout(resolve, delayMs * attempt)
+          );
         }
       }
     }
-    
+
     // All retries failed
     return { data: null as any, error: lastError };
   }
@@ -188,43 +200,42 @@ export class SupabaseService {
    */
   private isRetryableError(error: any): boolean {
     if (!error) return false;
-    
+
     const retryableMessages = [
-      'fetch failed',
-      'network',
-      'timeout',
-      'ECONNREFUSED',
-      'ENOTFOUND',
-      'ETIMEDOUT',
-      'EAI_AGAIN',
+      "fetch failed",
+      "network",
+      "timeout",
+      "ECONNREFUSED",
+      "ENOTFOUND",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
     ];
-    
-    const errorMessage = error.message?.toLowerCase() || '';
-    return retryableMessages.some(msg => errorMessage.includes(msg.toLowerCase()));
+
+    const errorMessage = error.message?.toLowerCase() || "";
+    return retryableMessages.some((msg) =>
+      errorMessage.includes(msg.toLowerCase())
+    );
   }
 
   // Config operations
   async getConfig(): Promise<DatabaseConfig | null> {
     const result = await this.retryOperation<DatabaseConfig>(() =>
-      this.supabase
-        .from('config')
-        .select('*')
-        .single()
+      this.supabase.from("config").select("*").single()
     );
 
     if (result.error) {
-      console.error('Failed to get config after retries:', result.error);
+      console.error("Failed to get config after retries:", result.error);
       throw result.error;
     }
-    
+
     return result.data as DatabaseConfig | null;
   }
 
   async updateConfig(config: Partial<DatabaseConfig>): Promise<void> {
     const { error } = await this.supabase
-      .from('config')
+      .from("config")
       .update(config)
-      .eq('id', 1);
+      .eq("id", 1);
 
     if (error) throw error;
   }
@@ -233,32 +244,35 @@ export class SupabaseService {
   async getVesting(userWallet: string): Promise<DatabaseVesting | null> {
     // Get the most recent active vesting for this wallet
     const { data, error } = await this.supabase
-      .from('vestings')
-      .select('*')
-      .eq('user_wallet', userWallet)
-      .eq('is_active', true)
-      .order('created_at', { ascending: false })
+      .from("vestings")
+      .select("*")
+      .eq("user_wallet", userWallet)
+      .eq("is_active", true)
+      .order("created_at", { ascending: false })
       .limit(1);
 
     if (error) throw error;
     return data && data.length > 0 ? data[0] : null;
   }
 
-  async getVestingForPool(userWallet: string, poolId: string): Promise<DatabaseVesting | null> {
+  async getVestingForPool(
+    userWallet: string,
+    poolId: string
+  ): Promise<DatabaseVesting | null> {
     const { data, error } = await this.supabase
-      .from('vestings')
-      .select('*')
-      .eq('user_wallet', userWallet)
-      .eq('vesting_stream_id', poolId)
+      .from("vestings")
+      .select("*")
+      .eq("user_wallet", userWallet)
+      .eq("vesting_stream_id", poolId)
       .single();
 
-    if (error && error.code !== 'PGRST116') throw error;
+    if (error && error.code !== "PGRST116") throw error;
     return data;
   }
 
   async createVesting(input: CreateVestingInput): Promise<DatabaseVesting> {
     const { data, error } = await this.supabase
-      .from('vestings')
+      .from("vestings")
       .insert(input)
       .select()
       .single();
@@ -272,18 +286,18 @@ export class SupabaseService {
     updates: UpdateVestingInput
   ): Promise<void> {
     const { error } = await this.supabase
-      .from('vestings')
+      .from("vestings")
       .update(updates)
-      .eq('user_wallet', userWallet);
+      .eq("user_wallet", userWallet);
 
     if (error) throw error;
   }
 
   async getAllVestings(): Promise<DatabaseVesting[]> {
     const { data, error } = await this.supabase
-      .from('vestings')
-      .select('*')
-      .order('created_at', { ascending: false });
+      .from("vestings")
+      .select("*")
+      .order("created_at", { ascending: false });
 
     if (error) throw error;
     return data || [];
@@ -291,31 +305,33 @@ export class SupabaseService {
 
   async getActiveVestings(): Promise<DatabaseVesting[]> {
     const { data, error } = await this.supabase
-      .from('vestings')
-      .select('*')
-      .eq('is_active', true)
-      .eq('is_cancelled', false)
-      .order('created_at', { ascending: false });
+      .from("vestings")
+      .select("*")
+      .eq("is_active", true)
+      .eq("is_cancelled", false)
+      .order("created_at", { ascending: false });
 
     if (error) throw error;
     return data || [];
   }
 
-  async getVestingsByStreamId(streamId: string): Promise<DatabaseVesting | null> {
+  async getVestingsByStreamId(
+    streamId: string
+  ): Promise<DatabaseVesting | null> {
     const { data, error } = await this.supabase
-      .from('vestings')
-      .select('*')
-      .eq('streamflow_stream_id', streamId)
+      .from("vestings")
+      .select("*")
+      .eq("streamflow_stream_id", streamId)
       .single();
 
-    if (error && error.code !== 'PGRST116') throw error;
+    if (error && error.code !== "PGRST116") throw error;
     return data;
   }
 
   // Claim history operations
   async createClaim(input: CreateClaimInput): Promise<DatabaseClaimHistory> {
     const { data, error } = await this.supabase
-      .from('claim_history')
+      .from("claim_history")
       .insert(input)
       .select()
       .single();
@@ -326,10 +342,10 @@ export class SupabaseService {
 
   async getClaimHistory(userWallet: string): Promise<DatabaseClaimHistory[]> {
     const { data, error } = await this.supabase
-      .from('claim_history')
-      .select('*')
-      .eq('user_wallet', userWallet)
-      .order('claimed_at', { ascending: false });
+      .from("claim_history")
+      .select("*")
+      .eq("user_wallet", userWallet)
+      .order("claimed_at", { ascending: false });
 
     if (error) throw error;
     return data || [];
@@ -337,9 +353,9 @@ export class SupabaseService {
 
   async getAllClaimHistory(): Promise<DatabaseClaimHistory[]> {
     const { data, error } = await this.supabase
-      .from('claim_history')
-      .select('*')
-      .order('claimed_at', { ascending: false });
+      .from("claim_history")
+      .select("*")
+      .order("claimed_at", { ascending: false });
 
     if (error) throw error;
     return data || [];
@@ -347,18 +363,16 @@ export class SupabaseService {
 
   // Admin log operations
   async logAdminAction(input: LogAdminActionInput): Promise<void> {
-    const { error } = await this.supabase
-      .from('admin_logs')
-      .insert(input);
+    const { error } = await this.supabase.from("admin_logs").insert(input);
 
     if (error) throw error;
   }
 
   async getAdminLogs(limit: number = 100): Promise<DatabaseAdminLog[]> {
     const { data, error } = await this.supabase
-      .from('admin_logs')
-      .select('*')
-      .order('created_at', { ascending: false })
+      .from("admin_logs")
+      .select("*")
+      .order("created_at", { ascending: false })
       .limit(limit);
 
     if (error) throw error;
@@ -367,8 +381,9 @@ export class SupabaseService {
 
   // Helper functions
   async getUserVestingInfo(userWallet: string) {
-    const { data, error } = await this.supabase
-      .rpc('get_user_vesting', { wallet_address: userWallet });
+    const { data, error } = await this.supabase.rpc("get_user_vesting", {
+      wallet_address: userWallet,
+    });
 
     if (error) throw error;
     return data;
@@ -376,9 +391,9 @@ export class SupabaseService {
 
   async getStats() {
     const [activeCount, totalVested, totalClaimed] = await Promise.all([
-      this.supabase.rpc('get_active_vestings_count'),
-      this.supabase.rpc('get_total_tokens_vested'),
-      this.supabase.rpc('get_total_tokens_claimed'),
+      this.supabase.rpc("get_active_vestings_count"),
+      this.supabase.rpc("get_total_tokens_vested"),
+      this.supabase.rpc("get_total_tokens_claimed"),
     ]);
 
     return {
@@ -389,9 +404,11 @@ export class SupabaseService {
   }
 
   // Batch operations
-  async batchCreateVestings(vestings: CreateVestingInput[]): Promise<DatabaseVesting[]> {
+  async batchCreateVestings(
+    vestings: CreateVestingInput[]
+  ): Promise<DatabaseVesting[]> {
     const { data, error } = await this.supabase
-      .from('vestings')
+      .from("vestings")
       .insert(vestings)
       .select();
 
@@ -411,10 +428,10 @@ export class SupabaseService {
   // Pool management operations
   async getPoolMembers(poolId: string): Promise<DatabaseVesting[]> {
     const { data, error } = await this.supabase
-      .from('vestings')
-      .select('*')
-      .eq('vesting_stream_id', poolId)
-      .order('created_at', { ascending: false });
+      .from("vestings")
+      .select("*")
+      .eq("vesting_stream_id", poolId)
+      .order("created_at", { ascending: false });
 
     if (error) throw error;
     return data || [];
@@ -426,24 +443,24 @@ export class SupabaseService {
     updates: UpdateVestingInput
   ): Promise<void> {
     const { error } = await this.supabase
-      .from('vestings')
+      .from("vestings")
       .update(updates)
-      .eq('vesting_stream_id', poolId)
-      .eq('user_wallet', userWallet);
+      .eq("vesting_stream_id", poolId)
+      .eq("user_wallet", userWallet);
 
     if (error) throw error;
   }
 
   async removePoolMember(poolId: string, userWallet: string): Promise<void> {
     const { error } = await this.supabase
-      .from('vestings')
-      .update({ 
-        is_active: false, 
+      .from("vestings")
+      .update({
+        is_active: false,
         is_cancelled: true,
-        cancellation_reason: 'Removed by admin'
+        cancellation_reason: "Removed by admin",
       })
-      .eq('vesting_stream_id', poolId)
-      .eq('user_wallet', userWallet);
+      .eq("vesting_stream_id", poolId)
+      .eq("user_wallet", userWallet);
 
     if (error) throw error;
   }
@@ -451,20 +468,20 @@ export class SupabaseService {
   // Pool state management operations
   async getPoolState(poolId: string): Promise<{ state: string }> {
     const { data, error } = await this.supabase
-      .from('vesting_streams')
-      .select('state')
-      .eq('id', poolId)
+      .from("vesting_streams")
+      .select("state")
+      .eq("id", poolId)
       .single();
 
     if (error) throw error;
-    return data || { state: 'active' };
+    return data || { state: "active" };
   }
 
   async updatePoolState(poolId: string, state: string): Promise<void> {
     const { error } = await this.supabase
-      .from('vesting_streams')
+      .from("vesting_streams")
       .update({ state })
-      .eq('id', poolId);
+      .eq("id", poolId);
 
     if (error) throw error;
   }
