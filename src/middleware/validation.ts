@@ -44,31 +44,4 @@ export const schemas = {
       .regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/, "Invalid Solana wallet address"),
     amountToClaim: z.number().positive().optional(),
   }),
-
-  updatePool: z.object({
-    name: z.string().min(3).max(50).optional(),
-    description: z.string().optional(),
-    // We limit what can be updated to prevent changing core pool logic after creation
-  }),
-
-  updateAllocations: z.object({
-    allocations: z
-      .array(
-        z.object({
-          wallet: z
-            .string()
-            .regex(
-              /^[1-9A-HJ-NP-Za-km-z]{32,44}$/,
-              "Invalid Solana wallet address"
-            ),
-          allocationType: z
-            .enum(["percentage", "fixed", "PERCENTAGE", "FIXED"])
-            .optional(),
-          allocationValue: z.number().nonnegative(),
-          note: z.string().optional(),
-          tier: z.number().int().min(1).optional(),
-        })
-      )
-      .min(1, "Allocations array cannot be empty"),
-  }),
 };

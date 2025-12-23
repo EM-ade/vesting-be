@@ -13,7 +13,7 @@ import { StreamController } from "./streamController";
 import { TreasuryController } from "./treasuryController";
 import { ProjectController } from "./projectController";
 import { CreateProjectController } from "./createProjectController";
-import { requireAdmin, requireProject } from "../middleware/adminAuth";
+import { requireAdmin } from "../middleware/adminAuth";
 import { claimRateLimiter } from "../middleware/rateLimiter";
 import { deduplicationMiddleware } from "../middleware/deduplication";
 import { validate, schemas } from "../middleware/validation";
@@ -52,36 +52,21 @@ router.post(
 // Pool routes
 router.post(
   "/pools",
-  requireAdmin,
-  requireProject,
   validate(schemas.createPool),
   poolController.createPool.bind(poolController)
 );
 router.post(
   "/pools/validate",
-  requireAdmin,
-  requireProject,
   validate(schemas.createPool),
   poolController.validatePool.bind(poolController)
 );
-router.put(
-  "/pools/:id",
-  requireAdmin,
-  requireProject,
-  validate(schemas.updatePool),
-  poolController.updatePool.bind(poolController)
-);
+router.put("/pools/:id", poolController.updatePool.bind(poolController));
 router.put(
   "/pools/:id/allocations",
-  requireAdmin,
-  requireProject,
-  validate(schemas.updateAllocations),
   poolController.updateAllocations.bind(poolController)
 );
 router.put(
   "/pools/:id/rules/:ruleId",
-  requireAdmin,
-  requireProject,
   poolController.updatePoolRule.bind(poolController)
 );
 router.get("/pools", poolController.listPools.bind(poolController));
@@ -190,11 +175,7 @@ router.post(
 );
 
 // Claims routes
-router.get(
-  "/claims",
-  requireProject,
-  claimsController.listClaims.bind(claimsController)
-);
+router.get("/claims", claimsController.listClaims.bind(claimsController));
 router.get(
   "/claims/stats",
   claimsController.getClaimStats.bind(claimsController)

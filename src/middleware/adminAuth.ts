@@ -92,32 +92,3 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
     });
   }
 }
-
-/**
- * Middleware to strictly enforce Project ID presence
- * Ensures that endpoints requiring project context cannot be called without it
- */
-export function requireProject(
-  req: Request,
-  res: Response,
-  next: NextFunction
-) {
-  const projectId =
-    (req.headers["x-project-id"] as string) ||
-    req.body?.projectId ||
-    req.query?.projectId;
-
-  if (!projectId || typeof projectId !== "string" || projectId.trim() === "") {
-    return res.status(400).json({
-      error:
-        "Project ID is required. Please provide it via headers (x-project-id), query, or body.",
-    });
-  }
-
-  // Attach to request for easy access in controllers
-  req.projectId = projectId;
-
-  // Update body/query to ensure downstream controllers find it where they expect it
-  // (though they should switch to using req.projectId)
-  next();
-}
