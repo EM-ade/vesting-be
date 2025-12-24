@@ -60,33 +60,153 @@ export class StreamflowService {
       // This prevents "insufficient rent" errors by ensuring all required accounts are initialized
       const { getOrCreateAssociatedTokenAccount } = await import('@solana/spl-token');
       
-      console.log('[STREAMFLOW] Ensuring sender ATA exists...');
-      const senderAta = await getOrCreateAssociatedTokenAccount(
-        this.connection,
-        adminKeypair,
-        tokenMint,
-        adminKeypair.publicKey
-      );
-      console.log(`[STREAMFLOW] Sender ATA: ${senderAta.address.toBase58()}`);
+      // CRITICAL FIX: Handle Native SOL (wSOL) differently from SPL tokens
+      const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
+      const isNativeSOL = tokenMint.toBase58() === NATIVE_SOL_MINT;
 
-      // Since sender and recipient are the same (admin wallet), we only need one ATA
-      // But let's verify the account has sufficient balance
-      const tokenBalance = Number(senderAta.amount) / Math.pow(10, tokenDecimals);
-      const requiredAmount = totalAmount * 1.005; // Including 0.5% buffer for fees
-      
-      console.log(`[STREAMFLOW] Token balance: ${tokenBalance}, Required: ${requiredAmount}`);
-      
-      if (tokenBalance < requiredAmount) {
-        throw new Error(`Insufficient token balance. Required: ${requiredAmount}, Available: ${tokenBalance}`);
-      }
+      console.log(`[STREAMFLOW] Token type: ${isNativeSOL ? 'Native SOL (wSOL)' : 'SPL Token'}`);
 
-      // Check SOL balance for rent
-      const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
-      const solBalanceSOL = solBalance / 1e9;
-      console.log(`[STREAMFLOW] SOL balance: ${solBalanceSOL.toFixed(4)} SOL`);
-      
-      if (solBalanceSOL < 0.015) {
-        throw new Error(`Insufficient SOL for Streamflow rent. Required: ~0.015 SOL, Available: ${solBalanceSOL.toFixed(4)} SOL`);
+      if (isNativeSOL) {
+        // For Native SOL: Check main wallet balance, not wSOL ATA
+        const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
+        const solBalanceSOL = solBalance / 1e9;
+        // Required: Pool amount + wrapping tx fee + Streamflow account rent + buffer
+        const requiredSOL = totalAmount + 0.02; // Pool amount + 0.02 SOL for all fees
+        
+        console.log(`[STREAMFLOW] Native SOL balance: ${solBalanceSOL.toFixed(4)} SOL`);
+        console.log(`[STREAMFLOW] Required: ${requiredSOL.toFixed(4)} SOL (${totalAmount} pool + 0.02 fees/rent)`);
+        
+        if (solBalanceSOL < requiredSOL) {
+          throw new Error(
+            `Insufficient SOL. Required: ${requiredSOL.toFixed(4)} SOL (${totalAmount} for pool + 0.02 for fees/rent), ` +
+            `Available: ${solBalanceSOL.toFixed(4)} SOL`
+          );
+        }
+
+        // CRITICAL: Streamflow SDK expects wSOL tokens in the ATA, not native SOL balance
+        // We must wrap SOL into wSOL ATA before calling Streamflow
+        console.log('[STREAMFLOW] Native SOL detected - wrapping SOL into wSOL ATA...');
+        
+        const { 
+          getAssociatedTokenAddress, 
+          createAssociatedTokenAccountInstruction,
+          createSyncNativeInstruction,
+          TOKEN_PROGRAM_ID,
+          NATIVE_MINT
+        } = await import('@solana/spl-token');
+        const { SystemProgram, Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
+        
+        // Get wSOL ATA address
+        const wsolATA = await getAssociatedTokenAddress(
+          NATIVE_MINT,
+          adminKeypair.publicKey
+        );
+        
+        console.log(`[STREAMFLOW] wSOL ATA address: ${wsolATA.toBase58()}`);
+        
+        // Check if ATA exists
+        const ataInfo = await this.connection.getAccountInfo(wsolATA);
+        
+        // Build transaction to wrap SOL
+        const wrapTransaction = new Transaction();
+        
+        // Step 1: Create ATA if it doesn't exist
+        if (!ataInfo) {
+          console.log('[STREAMFLOW] Creating wSOL ATA...');
+          wrapTransaction.add(
+            createAssociatedTokenAccountInstruction(
+              adminKeypair.publicKey,  // payer
+              wsolATA,                 // associated token account
+              adminKeypair.publicKey,  // owner
+              NATIVE_MINT              // mint
+            )
+          );
+        } else {
+          console.log('[STREAMFLOW] wSOL ATA already exists');
+        }
+        
+        // Step 2: Transfer SOL to wSOL ATA (this wraps it)
+        // CRITICAL: Streamflow Create instruction deducts fees from the wrapped amount
+        // So we need to wrap: poolAmount + Streamflow fees
+        // Streamflow fee: ~0.0005 SOL (taken from wrapped amount)
+        // We wrap the exact pool amount - Streamflow will handle the fee internally
+        const lamportsToWrap = Math.floor(totalAmount * 1e9); // Wrap exact pool amount
+        console.log(`[STREAMFLOW] Transferring ${lamportsToWrap} lamports (${totalAmount} SOL) to wSOL ATA...`);
+        console.log(`[STREAMFLOW] Note: Streamflow will deduct its fee (~0.0005 SOL) from the wrapped amount`);
+        
+        wrapTransaction.add(
+          SystemProgram.transfer({
+            fromPubkey: adminKeypair.publicKey,
+            toPubkey: wsolATA,
+            lamports: lamportsToWrap,
+          })
+        );
+        
+        // Step 3: Sync native (updates wSOL balance)
+        wrapTransaction.add(
+          createSyncNativeInstruction(wsolATA)
+        );
+        
+        // Send wrapping transaction
+        console.log('[STREAMFLOW] Sending wrapping transaction...');
+        const wrapSignature = await sendAndConfirmTransaction(
+          this.connection,
+          wrapTransaction,
+          [adminKeypair],
+          { commitment: 'confirmed' }
+        );
+        
+        console.log(`[STREAMFLOW] ✅ SOL wrapped successfully. Signature: ${wrapSignature}`);
+        
+        // Verify wSOL balance
+        const wrappedAta = await getOrCreateAssociatedTokenAccount(
+          this.connection,
+          adminKeypair,
+          NATIVE_MINT,
+          adminKeypair.publicKey
+        );
+        const wrappedBalance = Number(wrappedAta.amount) / 1e9;
+        console.log(`[STREAMFLOW] wSOL ATA balance after wrapping: ${wrappedBalance.toFixed(4)} SOL`);
+        
+        if (wrappedBalance < totalAmount) {
+          throw new Error(
+            `Failed to wrap sufficient SOL. Expected: ${totalAmount} SOL, Got: ${wrappedBalance.toFixed(4)} SOL`
+          );
+        }
+        
+        console.log(`[STREAMFLOW] ✅ Wrapped ${wrappedBalance.toFixed(4)} SOL successfully`);
+      } else {
+        // For SPL Tokens: Check ATA balance
+        console.log('[STREAMFLOW] Ensuring sender ATA exists...');
+        const senderAta = await getOrCreateAssociatedTokenAccount(
+          this.connection,
+          adminKeypair,
+          tokenMint,
+          adminKeypair.publicKey
+        );
+        console.log(`[STREAMFLOW] Sender ATA: ${senderAta.address.toBase58()}`);
+
+        const tokenBalance = Number(senderAta.amount) / Math.pow(10, tokenDecimals);
+        const requiredAmount = totalAmount * 1.005; // Including 0.5% buffer for fees
+        
+        console.log(`[STREAMFLOW] Token balance: ${tokenBalance}, Required: ${requiredAmount}`);
+        
+        if (tokenBalance < requiredAmount) {
+          throw new Error(
+            `Insufficient token balance. Required: ${requiredAmount}, Available: ${tokenBalance}`
+          );
+        }
+
+        // Check SOL balance for rent (separate from token balance)
+        const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
+        const solBalanceSOL = solBalance / 1e9;
+        console.log(`[STREAMFLOW] SOL balance for rent: ${solBalanceSOL.toFixed(4)} SOL`);
+        
+        if (solBalanceSOL < 0.015) {
+          throw new Error(
+            `Insufficient SOL for Streamflow rent. Required: ~0.015 SOL, Available: ${solBalanceSOL.toFixed(4)} SOL`
+          );
+        }
       }
 
       // Create stream where admin is BOTH sender and recipient

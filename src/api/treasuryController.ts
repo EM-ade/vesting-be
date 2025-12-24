@@ -174,6 +174,18 @@ export class TreasuryController {
         }
       }
 
+      // PERFORMANCE FIX: Make RPC calls with timeout and parallel execution
+      const RPC_TIMEOUT_MS = 10000; // 10 second timeout per RPC call
+      
+      const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
+        return Promise.race([
+          promise,
+          new Promise<T>((_, reject) =>
+            setTimeout(() => reject(new Error('RPC call timed out')), timeoutMs)
+          ),
+        ]);
+      };
+
       // Get treasury token balance
       const treasuryTokenAccount = await getAssociatedTokenAddress(
         tokenMint,
@@ -181,24 +193,42 @@ export class TreasuryController {
       );
 
       let treasuryBalance = 0;
+      let solBalance = 0;
       const TOKEN_DECIMALS = 9;
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
-      try {
-        const accountInfo = await getAccount(
-          this.connection,
-          treasuryTokenAccount
-        );
-        // Convert from base units to human-readable tokens
-        treasuryBalance = Number(accountInfo.amount) / TOKEN_DIVISOR;
-      } catch (err) {
-        // Token account doesn't exist yet
-        treasuryBalance = 0;
+      // Parallelize RPC calls with timeout protection
+      const [tokenAccountResult, solBalanceResult, tokenAccountsResult] = await Promise.allSettled([
+        // Token balance
+        withTimeout(
+          getAccount(this.connection, treasuryTokenAccount),
+          RPC_TIMEOUT_MS
+        ).catch(() => null),
+        
+        // SOL balance
+        withTimeout(
+          this.connection.getBalance(treasuryPublicKey),
+          RPC_TIMEOUT_MS
+        ).catch(() => 0),
+        
+        // All token accounts (most expensive call)
+        withTimeout(
+          this.connection.getParsedTokenAccountsByOwner(treasuryPublicKey, {
+            programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+          }),
+          RPC_TIMEOUT_MS
+        ).catch(() => null),
+      ]);
+
+      // Process token balance result
+      if (tokenAccountResult.status === 'fulfilled' && tokenAccountResult.value) {
+        treasuryBalance = Number(tokenAccountResult.value.amount) / TOKEN_DIVISOR;
       }
 
-      // Get SOL balance
-      const solBalance =
-        (await this.connection.getBalance(treasuryPublicKey)) / 1e9; // Convert lamports to SOL
+      // Process SOL balance result
+      if (solBalanceResult.status === 'fulfilled') {
+        solBalance = solBalanceResult.value / 1e9;
+      }
 
       // Get all token accounts for this treasury wallet
       let tokens: { symbol: string; balance: number; mint: string }[] = [];
@@ -210,52 +240,49 @@ export class TreasuryController {
         mint: "So11111111111111111111111111111111111111112",
       });
 
-      try {
-        const tokenAccounts =
-          await this.connection.getParsedTokenAccountsByOwner(
-            treasuryPublicKey,
-            {
-              programId: new PublicKey(
-                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-              ), // SPL Token Program
-            }
-          );
+      // Process token accounts result
+      if (tokenAccountsResult.status === 'fulfilled' && tokenAccountsResult.value) {
+        try {
+          const tokenAccounts = tokenAccountsResult.value;
 
-        const spl_tokens = tokenAccounts.value
-          .map((accountInfo) => {
-            const parsedInfo = accountInfo.account.data.parsed.info;
-            const mintAddress = parsedInfo.mint;
-            const amount = parsedInfo.tokenAmount.uiAmount;
+          const spl_tokens = tokenAccounts.value
+            .map((accountInfo) => {
+              const parsedInfo = accountInfo.account.data.parsed.info;
+              const mintAddress = parsedInfo.mint;
+              const amount = parsedInfo.tokenAmount.uiAmount;
 
-            // Determine symbol
-            let symbol = "Unknown";
+              // Determine symbol
+              let symbol = "Unknown";
 
-            // Check against project token mint
-            if (mintAddress === tokenMint.toBase58()) {
-              // Use project symbol if available
-              symbol = projectData?.symbol || "Token";
-            } else if (
-              mintAddress === "So11111111111111111111111111111111111111112"
-            ) {
-              symbol = "SOL";
-            } else if (
-              mintAddress === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-            ) {
-              symbol = "USDC";
-            }
+              // Check against project token mint
+              if (mintAddress === tokenMint.toBase58()) {
+                // Use project symbol if available
+                symbol = projectData?.symbol || "Token";
+              } else if (
+                mintAddress === "So11111111111111111111111111111111111111112"
+              ) {
+                symbol = "SOL";
+              } else if (
+                mintAddress === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+              ) {
+                symbol = "USDC";
+              }
 
-            return {
-              symbol,
-              balance: amount,
-              mint: mintAddress,
-            };
-          })
-          .filter((t) => t.balance > 0);
+              return {
+                symbol,
+                balance: amount,
+                mint: mintAddress,
+              };
+            })
+            .filter((t) => t.balance > 0);
 
-        // Add SPL tokens to the list
-        tokens = [...tokens, ...spl_tokens];
-      } catch (err) {
-        console.warn("Failed to fetch SPL token accounts for treasury:", err);
+          // Add SPL tokens to the list
+          tokens = [...tokens, ...spl_tokens];
+        } catch (err) {
+          console.warn("Failed to parse SPL token accounts:", err);
+        }
+      } else {
+        console.warn("Failed to fetch token accounts or timed out");
       }
 
       // Get total allocated from database (Scoped to project if applicable)

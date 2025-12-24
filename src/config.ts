@@ -33,6 +33,11 @@ export const config = {
   gracePeriodDays: parseInt(process.env.GRACE_PERIOD_DAYS || "30"),
   masterPassword:
     process.env.MASTER_PASSWORD || "default_dev_password_do_not_use_prod",
+  // Minimum payout threshold in lamports (10,000 lamports = 0.00001 SOL)
+  // Allocations below this amount will be set to 0 and tracked as unallocated remainder
+  minPayoutLamports: parseInt(
+    process.env.MIN_PAYOUT_LAMPORTS || "10000"
+  ),
 }; // 1M tokens with 9 decimals
 
 export const getConnection = () =>

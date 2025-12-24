@@ -532,101 +532,37 @@ export class PoolController {
       
       console.log(`[POOL CREATION] Using token_mint: ${poolTokenMint}`);
 
-      const { data: stream, error } = await this.dbService.supabase
-        .from('vesting_streams')
-        .insert({
-          project_id: poolProjectId,
-          name,
-          description: description || '',
-          total_pool_amount, // DB now supports numeric/float
-          vesting_duration_days: durationDaysInt,
-          cliff_duration_days: cliffDaysInt,
-          vesting_duration_seconds: Math.floor(vesting_duration_seconds || (vesting_duration_days * 86400)),
-          cliff_duration_seconds: Math.floor(cliff_duration_seconds || (cliffDaysInt * 86400)),
-          start_time: start_time || new Date().toISOString(),
-          end_time: end_time || new Date(Date.now() + vesting_duration_days * 24 * 60 * 60 * 1000).toISOString(),
-          is_active: is_active !== undefined ? is_active : true,
-          vesting_mode: vesting_mode || 'snapshot',
-          pool_type: (vesting_mode || 'snapshot').toUpperCase(), // Ensure pool_type matches vesting_mode
-          state: 'active', // Explicitly set state to active
-          snapshot_taken: vesting_mode === 'manual' ? true : false, // Manual allocations are pre-taken
-          nft_requirements: nftRequirements,
-          tier_allocations: {}, // Empty object for now
-          grace_period_days: 30,
-          claim_fee_lamports: claim_fee_lamports !== undefined ? claim_fee_lamports : 1000000, // Default 0.001 SOL
-          token_mint: poolTokenMint, // Add token mint from request or project
-        })
-        .select()
-        .single();
-
-      if (error) {
-        throw new Error(`Failed to create pool: ${error.message}`);
-      }
-
-      // If manual mode, create allocations for specified wallets
-      if (vesting_mode === 'manual' && manual_allocations && Array.isArray(manual_allocations)) {
-        console.log(`Creating ${manual_allocations.length} manual allocations...`);
-
-        // Import AllocationCalculator dynamically
-        const { AllocationCalculator } = await import('../services/allocationCalculator');
-
-        // Map frontend input to AllocationInput format
-        const allocationInputs = manual_allocations.map((alloc: any) => ({
-          wallet: alloc.wallet,
-          type: (alloc.allocationType || 'FIXED').toLowerCase() as 'percentage' | 'fixed',
-          value: alloc.allocationValue,
-          note: alloc.note,
-          tier: 1
-        }));
-
-        // Calculate allocations
-        const calculatedAllocations = AllocationCalculator.calculateAllocations(
-          allocationInputs,
-          total_pool_amount
-        );
-
-        // Validate allocations
-        const validation = AllocationCalculator.validateAllocations(
-          calculatedAllocations,
-          total_pool_amount
-        );
-
-        if (!validation.valid) {
-          console.warn(`Allocation validation warning: ${validation.message}`);
-          // We continue anyway but log the warning, or we could throw error
-        }
-
-        for (const allocation of calculatedAllocations) {
-          const { error: vestingError } = await this.dbService.supabase
-            .from('vestings')
-            .insert({
-              project_id: poolProjectId,
-              vesting_stream_id: stream.id,
-              user_wallet: allocation.wallet,
-              token_amount: allocation.tokenAmount,
-              share_percentage: allocation.percentage,
-              allocation_type: allocation.originalType.toLowerCase(),
-              allocation_value: allocation.originalValue,
-              original_percentage: allocation.percentage, // Store for reference
-              tier: allocation.tier,
-              nft_count: 0,
-              is_active: true,
-              is_cancelled: false,
-            });
-
-          if (vestingError) {
-            console.error(`Failed to create vesting for ${allocation.wallet}:`, vestingError);
-          } else {
-            console.log(`✅ Allocated ${allocation.tokenAmount} tokens (${allocation.percentage.toFixed(2)}%) to ${allocation.wallet}${allocation.note ? ' (' + allocation.note + ')' : ''}`);
-          }
-        }
-      }
-
-      // Auto-deploy to Streamflow (unless skipped)
+      // CRITICAL CHANGE: First attempt Streamflow deployment, THEN create in DB
+      // This ensures we don't create orphaned DB records if Streamflow fails
+      
       let streamflowId = null;
       let streamflowSignature = null;
-      let streamflowError = null;
 
+      // Prepare pool data for DB insertion (after Streamflow succeeds)
+      const poolData = {
+        project_id: poolProjectId,
+        name,
+        description: description || '',
+        total_pool_amount, // DB now supports numeric/float
+        vesting_duration_days: durationDaysInt,
+        cliff_duration_days: cliffDaysInt,
+        vesting_duration_seconds: Math.floor(vesting_duration_seconds || (vesting_duration_days * 86400)),
+        cliff_duration_seconds: Math.floor(cliff_duration_seconds || (cliffDaysInt * 86400)),
+        start_time: start_time || new Date().toISOString(),
+        end_time: end_time || new Date(Date.now() + vesting_duration_days * 24 * 60 * 60 * 1000).toISOString(),
+        is_active: is_active !== undefined ? is_active : true,
+        vesting_mode: vesting_mode || 'snapshot',
+        pool_type: (vesting_mode || 'snapshot').toUpperCase(), // Ensure pool_type matches vesting_mode
+        state: 'active', // Explicitly set state to active
+        snapshot_taken: vesting_mode === 'manual' ? true : false, // Manual allocations are pre-taken
+        nft_requirements: nftRequirements,
+        tier_allocations: {}, // Empty object for now
+        grace_period_days: 30,
+        claim_fee_lamports: claim_fee_lamports !== undefined ? claim_fee_lamports : 1000000, // Default 0.001 SOL
+        token_mint: poolTokenMint, // Add token mint from request or project
+      };
+
+      // Auto-deploy to Streamflow FIRST (unless skipped)
       if (!skipStreamflow) {
         try {
           console.log('Auto-deploying pool to Streamflow...');
@@ -670,36 +606,42 @@ export class PoolController {
           // Token mint is already resolved above
           // const tokenMint = ... (removed redundant declaration)
 
-          // Ensure admin has an Associated Token Account (ATA) for this mint
-          // This fixes "TokenAccountNotFoundError" by creating it if it doesn't exist
-          try {
-            console.log(`[POOL] Ensuring ATA exists for admin ${adminKeypair.publicKey.toBase58()} and mint ${tokenMint.toBase58()}...`);
-            const adminAta = await getOrCreateAssociatedTokenAccount(
-              this.connection,
-              adminKeypair, // Payer
-              tokenMint,
-              adminKeypair.publicKey // Owner
-            );
-            console.log(`[POOL] Admin ATA ready: ${adminAta.address.toBase58()}`);
-          } catch (ataError) {
-            console.error('[POOL] Failed to ensure admin ATA exists:', ataError);
-            // We continue, as it might already exist or Streamflow might handle it (though unlikely if it failed before)
-          }
-
           // PRE-DEPLOYMENT VERIFICATION: Check treasury has sufficient funds
           console.log('[STREAMFLOW] Verifying treasury has sufficient funds before deployment...');
           
           const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
           const isNativeSOL = tokenMint.toBase58() === NATIVE_SOL_MINT;
+
+          // Only create ATA for SPL tokens, not for Native SOL (wSOL wrapping handles it differently)
+          if (!isNativeSOL) {
+            // Ensure admin has an Associated Token Account (ATA) for this mint
+            // This fixes "TokenAccountNotFoundError" by creating it if it doesn't exist
+            try {
+              console.log(`[POOL] Ensuring ATA exists for admin ${adminKeypair.publicKey.toBase58()} and mint ${tokenMint.toBase58()}...`);
+              const adminAta = await getOrCreateAssociatedTokenAccount(
+                this.connection,
+                adminKeypair, // Payer
+                tokenMint,
+                adminKeypair.publicKey // Owner
+              );
+              console.log(`[POOL] Admin ATA ready: ${adminAta.address.toBase58()}`);
+            } catch (ataError) {
+              console.error('[POOL] Failed to ensure admin ATA exists:', ataError);
+              // We continue, as it might already exist or Streamflow might handle it
+            }
+          } else {
+            console.log('[POOL] Native SOL detected - skipping SPL token ATA creation (wSOL wrapping will handle it)');
+          }
           
           if (isNativeSOL) {
             // For native SOL, check SOL balance
             const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
             const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
-            const requiredSOL = (total_pool_amount * 1.005) + 0.015;
+            // Required: Pool amount + wrapping tx + Streamflow fees + rent + buffer
+            const requiredSOL = total_pool_amount + 0.025; // Pool + 0.025 SOL for all fees
             
             console.log(`[STREAMFLOW] Native SOL pool - Treasury balance: ${solBalanceInSOL.toFixed(4)} SOL`);
-            console.log(`[STREAMFLOW] Required: ${requiredSOL.toFixed(4)} SOL (${total_pool_amount} pool + 0.5% buffer + 0.015 deployment fees)`);
+            console.log(`[STREAMFLOW] Required: ${requiredSOL.toFixed(4)} SOL (${total_pool_amount} pool + 0.025 fees/rent)`);
             
             if (solBalanceInSOL < requiredSOL) {
               throw new Error(`Treasury has insufficient SOL. Required: ${requiredSOL.toFixed(4)} SOL, Available: ${solBalanceInSOL.toFixed(4)} SOL. Please fund the treasury before deploying.`);
@@ -745,16 +687,16 @@ export class PoolController {
             console.log('[STREAMFLOW] ✅ Treasury has sufficient SOL for deployment fees');
           }
 
-          const startTimestamp = Math.floor(new Date(stream.start_time).getTime() / 1000);
-          const endTimestamp = Math.floor(new Date(stream.end_time).getTime() / 1000);
+          const startTimestamp = Math.floor(new Date(poolData.start_time).getTime() / 1000);
+          const endTimestamp = Math.floor(new Date(poolData.end_time).getTime() / 1000);
           const nowTimestamp = Math.floor(Date.now() / 1000);
 
           // Calculate cliff time if cliff_duration_days was provided
           let cliffTimestamp: number | undefined = undefined;
-          if (stream.cliff_duration_days && stream.cliff_duration_days > 0) {
+          if (poolData.cliff_duration_days && poolData.cliff_duration_days > 0) {
             const effectiveStart = startTimestamp < nowTimestamp ? nowTimestamp + 60 : startTimestamp;
-            cliffTimestamp = effectiveStart + Math.floor(stream.cliff_duration_days * 86400);
-            console.log(`Cliff time calculated: ${cliffTimestamp} (${stream.cliff_duration_days} days after start)`);
+            cliffTimestamp = effectiveStart + Math.floor(poolData.cliff_duration_days * 86400);
+            console.log(`Cliff time calculated: ${cliffTimestamp} (${poolData.cliff_duration_days} days after start)`);
           }
 
           // Validate timestamps for Streamflow
@@ -766,17 +708,17 @@ export class PoolController {
             const adjustedEnd = adjustedStart + duration;
             // Adjust cliff time if it was set
             if (cliffTimestamp) {
-              cliffTimestamp = adjustedStart + Math.floor(stream.cliff_duration_days * 86400);
+              cliffTimestamp = adjustedStart + Math.floor(poolData.cliff_duration_days * 86400);
             }
 
             const streamflowResult = await this.streamflowService.createVestingPool({
               adminKeypair,
               tokenMint,
-              totalAmount: stream.total_pool_amount,
+              totalAmount: poolData.total_pool_amount,
               startTime: adjustedStart,
               endTime: adjustedEnd,
               cliffTime: cliffTimestamp,
-              poolName: stream.name,
+              poolName: poolData.name,
             });
 
             streamflowId = streamflowResult.streamId;
@@ -785,31 +727,101 @@ export class PoolController {
             const streamflowResult = await this.streamflowService.createVestingPool({
               adminKeypair,
               tokenMint,
-              totalAmount: stream.total_pool_amount,
+              totalAmount: poolData.total_pool_amount,
               startTime: startTimestamp,
               endTime: endTimestamp,
               cliffTime: cliffTimestamp,
-              poolName: stream.name,
+              poolName: poolData.name,
             });
 
             streamflowId = streamflowResult.streamId;
             streamflowSignature = streamflowResult.signature;
           }
 
-          // Update DB with Streamflow ID
-          await this.dbService.supabase
-            .from('vesting_streams')
-            .update({ streamflow_stream_id: streamflowId })
-            .eq('id', stream.id);
-
-          console.log('Pool deployed to Streamflow:', streamflowId);
+          console.log('✅ Pool deployed to Streamflow:', streamflowId);
         } catch (error) {
-          streamflowError = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Failed to deploy to Streamflow (pool still created in DB):', streamflowError);
-          // Don't fail the entire request - pool is still created in DB
+          // CRITICAL: If Streamflow fails, throw error to prevent DB creation
+          const streamflowError = error instanceof Error ? error.message : 'Unknown error';
+          console.error('❌ Failed to deploy to Streamflow:', streamflowError);
+          throw new Error(`Streamflow deployment failed: ${streamflowError}`);
         }
       } else {
-        console.log('Skipping Streamflow deployment (skipStreamflow=true)');
+        console.log('⚠️  Skipping Streamflow deployment (skipStreamflow=true)');
+      }
+
+      // Only create DB record if Streamflow succeeded (or was skipped)
+      console.log('Creating pool in database...');
+      const { data: stream, error: dbError } = await this.dbService.supabase
+        .from('vesting_streams')
+        .insert({
+          ...poolData,
+          streamflow_stream_id: streamflowId, // Add Streamflow ID if deployed
+        })
+        .select()
+        .single();
+
+      if (dbError) {
+        throw new Error(`Failed to create pool in database: ${dbError.message}`);
+      }
+
+      console.log('✅ Pool created in database with ID:', stream.id);
+
+      // If manual mode, create allocations for specified wallets
+      if (vesting_mode === 'manual' && manual_allocations && Array.isArray(manual_allocations)) {
+        console.log(`Creating ${manual_allocations.length} manual allocations...`);
+
+        // Import AllocationCalculator dynamically
+        const { AllocationCalculator } = await import('../services/allocationCalculator');
+
+        // Map frontend input to AllocationInput format
+        const allocationInputs = manual_allocations.map((alloc: any) => ({
+          wallet: alloc.wallet,
+          type: (alloc.allocationType || 'FIXED').toLowerCase() as 'percentage' | 'fixed',
+          value: alloc.allocationValue,
+          note: alloc.note,
+          tier: 1
+        }));
+
+        // Calculate allocations
+        const calculatedAllocations = AllocationCalculator.calculateAllocations(
+          allocationInputs,
+          total_pool_amount
+        );
+
+        // Validate allocations
+        const validation = AllocationCalculator.validateAllocations(
+          calculatedAllocations,
+          total_pool_amount
+        );
+
+        if (!validation.valid) {
+          console.warn(`Allocation validation warning: ${validation.message}`);
+        }
+
+        for (const allocation of calculatedAllocations) {
+          const { error: vestingError } = await this.dbService.supabase
+            .from('vestings')
+            .insert({
+              project_id: poolProjectId,
+              vesting_stream_id: stream.id,
+              user_wallet: allocation.wallet,
+              token_amount: allocation.tokenAmount,
+              share_percentage: allocation.percentage,
+              allocation_type: allocation.originalType.toLowerCase(),
+              allocation_value: allocation.originalValue,
+              original_percentage: allocation.percentage,
+              tier: allocation.tier,
+              nft_count: 0,
+              is_active: true,
+              is_cancelled: false,
+            });
+
+          if (vestingError) {
+            console.error(`Failed to create vesting for ${allocation.wallet}:`, vestingError);
+          } else {
+            console.log(`✅ Allocated ${allocation.tokenAmount} tokens (${allocation.percentage.toFixed(2)}%) to ${allocation.wallet}${allocation.note ? ' (' + allocation.note + ')' : ''}`);
+          }
+        }
       }
 
       // Run immediate sync for snapshot/dynamic pools to populate vestings
@@ -911,14 +923,13 @@ export class PoolController {
 
       res.json({
         success: true,
+        message: 'Pool created successfully',
         stream: {
           ...stream,
           streamflow_stream_id: streamflowId,
         },
         streamflowDeployed: !!streamflowId,
         streamflowSignature,
-        streamflowError,
-        validation: !skipStreamflow ? validation : undefined,
       });
     } catch (error) {
       console.error('Failed to create pool:', error);
