@@ -56,6 +56,39 @@ export class StreamflowService {
       console.log('Duration:', startTime, '->', endTime);
       console.log('Cliff:', cliffTime || 'None (starts at start time)');
 
+      // CRITICAL FIX: Ensure Associated Token Account exists before Streamflow creates the pool
+      // This prevents "insufficient rent" errors by ensuring all required accounts are initialized
+      const { getOrCreateAssociatedTokenAccount } = await import('@solana/spl-token');
+      
+      console.log('[STREAMFLOW] Ensuring sender ATA exists...');
+      const senderAta = await getOrCreateAssociatedTokenAccount(
+        this.connection,
+        adminKeypair,
+        tokenMint,
+        adminKeypair.publicKey
+      );
+      console.log(`[STREAMFLOW] Sender ATA: ${senderAta.address.toBase58()}`);
+
+      // Since sender and recipient are the same (admin wallet), we only need one ATA
+      // But let's verify the account has sufficient balance
+      const tokenBalance = Number(senderAta.amount) / Math.pow(10, tokenDecimals);
+      const requiredAmount = totalAmount * 1.005; // Including 0.5% buffer for fees
+      
+      console.log(`[STREAMFLOW] Token balance: ${tokenBalance}, Required: ${requiredAmount}`);
+      
+      if (tokenBalance < requiredAmount) {
+        throw new Error(`Insufficient token balance. Required: ${requiredAmount}, Available: ${tokenBalance}`);
+      }
+
+      // Check SOL balance for rent
+      const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
+      const solBalanceSOL = solBalance / 1e9;
+      console.log(`[STREAMFLOW] SOL balance: ${solBalanceSOL.toFixed(4)} SOL`);
+      
+      if (solBalanceSOL < 0.015) {
+        throw new Error(`Insufficient SOL for Streamflow rent. Required: ~0.015 SOL, Available: ${solBalanceSOL.toFixed(4)} SOL`);
+      }
+
       // Create stream where admin is BOTH sender and recipient
       // This allows admin to withdraw vested tokens and distribute them
       const duration = endTime - startTime;
@@ -120,6 +153,15 @@ export class StreamflowService {
         withdrawalFrequency: 0,
         partner: undefined,
       };
+
+      console.log('[STREAMFLOW] Creating stream with params:', {
+        recipient: createStreamParams.recipient,
+        tokenId: createStreamParams.tokenId,
+        start: new Date(startTime * 1000).toISOString(),
+        amount: adjustedTotal,
+        period: periodSeconds,
+        cliff: effectiveCliff ? new Date(effectiveCliff * 1000).toISOString() : 'None'
+      });
 
       const createResult = await this.client.create(
         createStreamParams,
