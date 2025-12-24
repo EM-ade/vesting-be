@@ -955,20 +955,35 @@ export class PoolController {
         throw new Error(`Failed to fetch pools: ${error.message}`);
       }
 
+      // OPTIMIZATION: Batch fetch all vestings to avoid N+1 queries
+      const streamIds = streams?.map((s: any) => s.id) || [];
+      let allVestings: any[] = [];
+      
+      if (streamIds.length > 0) {
+        const { data: vestingsData } = await this.dbService.supabase
+          .from('vestings')
+          .select('token_amount, vesting_stream_id')
+          .in('vesting_stream_id', streamIds)
+          .eq('is_active', true);
+        
+        allVestings = vestingsData || [];
+      }
+
+      // Group vestings by stream ID
+      const vestingsByStream = new Map<string, any[]>();
+      allVestings.forEach((v: any) => {
+        if (!vestingsByStream.has(v.vesting_stream_id)) {
+          vestingsByStream.set(v.vesting_stream_id, []);
+        }
+        vestingsByStream.get(v.vesting_stream_id)?.push(v);
+      });
+
       // Enrich with Streamflow status and stats
       const pools = await Promise.all((streams || []).map(async (stream: any) => {
-        // DEBUG: Log raw state from DB
-        // console.log(`Pool ${stream.id} raw DB state: ${stream.state}, is_active: ${stream.is_active}`);
-
-        // Get user count and allocation stats
-        const { data: vestings } = await this.dbService.supabase
-          .from('vestings')
-          .select('token_amount')
-          .eq('vesting_stream_id', stream.id)
-          .eq('is_active', true);
-
-        const totalAllocated = vestings?.reduce((sum: number, v: any) => sum + Number(v.token_amount), 0) || 0;
-        const userCount = vestings?.length || 0;
+        // Get user count and allocation stats from pre-fetched data
+        const vestings = vestingsByStream.get(stream.id) || [];
+        const totalAllocated = vestings.reduce((sum: number, v: any) => sum + Number(v.token_amount), 0);
+        const userCount = vestings.length;
 
         // Get Streamflow status if deployed
         let streamflowStatus = null;

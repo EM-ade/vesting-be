@@ -87,28 +87,111 @@ export class ProjectController {
         return res.status(404).json({ error: 'Project not found' });
       }
 
-      // Live Balance Check (On-Chain)
-      if (project.vault_public_key) {
-        try {
-          const vaultPubkey = new PublicKey(project.vault_public_key);
-          const solBalance = await connection.getBalance(vaultPubkey);
-          const solBalanceFormatted = solBalance / LAMPORTS_PER_SOL;
+      // OPTIMIZATION: Fetch vesting progress data in parallel with live balance
+      const [vestingProgressData] = await Promise.all([
+        // Get vesting progress aggregates
+        (async () => {
+          try {
+            // Get all active pools for this project
+            const { data: pools } = await supabase
+              .from('vesting_streams')
+              .select('id, total_pool_amount, start_time, end_time, vesting_duration_seconds')
+              .eq('project_id', id)
+              .eq('is_active', true);
 
-          // Update DB if balance changed significantly (> 0.0001 SOL diff)
-          if (Math.abs(solBalanceFormatted - (project.vault_balance_sol || 0)) > 0.0001) {
-            await supabase
-              .from('projects')
-              .update({ vault_balance_sol: solBalanceFormatted })
-              .eq('id', id);
+            if (!pools || pools.length === 0) {
+              return { totalAllocated: 0, totalClaimed: 0, totalVested: 0, vestingProgress: 0 };
+            }
 
-            project.vault_balance_sol = solBalanceFormatted;
+            const poolIds = pools.map(p => p.id);
+
+            // Batch fetch vestings and claims
+            const [vestingsData, claimsData] = await Promise.all([
+              supabase
+                .from('vestings')
+                .select('token_amount, vesting_stream_id')
+                .in('vesting_stream_id', poolIds)
+                .eq('is_active', true),
+              supabase
+                .from('claim_history')
+                .select('amount_claimed, vesting_id')
+                .eq('project_id', id)
+            ]);
+
+            // Calculate totals
+            const totalAllocated = vestingsData.data?.reduce((sum: number, v: any) => 
+              sum + Number(v.token_amount), 0) || 0;
+
+            // Convert claims from base units (need to divide by 10^9)
+            const totalClaimedRaw = claimsData.data?.reduce((sum: number, c: any) => 
+              sum + Number(c.amount_claimed), 0) || 0;
+            const totalClaimed = totalClaimedRaw / 1e9; // Convert from base units
+
+            // Calculate vested amount based on time elapsed
+            const now = Date.now();
+            let totalVested = 0;
+
+            pools.forEach(pool => {
+              const startTime = new Date(pool.start_time).getTime();
+              const endTime = new Date(pool.end_time).getTime();
+              const duration = endTime - startTime;
+              
+              if (now < startTime) {
+                // Not started yet
+                return;
+              } else if (now >= endTime) {
+                // Fully vested
+                totalVested += pool.total_pool_amount;
+              } else {
+                // Partially vested
+                const elapsed = now - startTime;
+                const vestedPercentage = Math.min(1, elapsed / duration);
+                totalVested += pool.total_pool_amount * vestedPercentage;
+              }
+            });
+
+            const vestingProgress = totalAllocated > 0 ? (totalVested / totalAllocated) * 100 : 0;
+
+            return {
+              totalAllocated,
+              totalClaimed,
+              totalVested,
+              vestingProgress: Math.min(100, Math.round(vestingProgress * 100) / 100)
+            };
+          } catch (err) {
+            console.warn('Failed to fetch vesting progress:', err);
+            return { totalAllocated: 0, totalClaimed: 0, totalVested: 0, vestingProgress: 0 };
           }
-        } catch (balErr) {
-          console.warn(`Failed to fetch live balance for project ${id}:`, balErr);
-        }
-      }
+        })(),
+        // Live Balance Check (On-Chain)
+        (async () => {
+          if (project.vault_public_key) {
+            try {
+              const vaultPubkey = new PublicKey(project.vault_public_key);
+              const solBalance = await connection.getBalance(vaultPubkey);
+              const solBalanceFormatted = solBalance / LAMPORTS_PER_SOL;
 
-      res.json(project);
+              // Update DB if balance changed significantly (> 0.0001 SOL diff)
+              if (Math.abs(solBalanceFormatted - (project.vault_balance_sol || 0)) > 0.0001) {
+                await supabase
+                  .from('projects')
+                  .update({ vault_balance_sol: solBalanceFormatted })
+                  .eq('id', id);
+
+                project.vault_balance_sol = solBalanceFormatted;
+              }
+            } catch (balErr) {
+              console.warn(`Failed to fetch live balance for project ${id}:`, balErr);
+            }
+          }
+        })()
+      ]);
+
+      // Add vesting progress to response
+      res.json({
+        ...project,
+        vestingProgress: vestingProgressData
+      });
     } catch (error) {
       console.error('Failed to get project details:', error);
       res.status(500).json({ error: 'Failed to get project details' });
