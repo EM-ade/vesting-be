@@ -231,60 +231,13 @@ export class TreasuryController {
         solBalance = solBalanceResult.value / 1e9;
       }
 
+      // Get locked amounts per token from allocations (calculated below)
+      // We'll update the tokens array with available balances after fetching allocations
+      
       // Get all token accounts for this treasury wallet
       let tokens: { symbol: string; balance: number; mint: string }[] = [];
 
-      // Add SOL first
-      tokens.push({
-        symbol: "SOL",
-        balance: solBalance,
-        mint: "So11111111111111111111111111111111111111112",
-      });
-
-      // Process token accounts result
-      if (tokenAccountsResult.status === 'fulfilled' && tokenAccountsResult.value) {
-        try {
-          const tokenAccounts = tokenAccountsResult.value;
-
-          const spl_tokens = tokenAccounts.value
-            .map((accountInfo) => {
-              const parsedInfo = accountInfo.account.data.parsed.info;
-              const mintAddress = parsedInfo.mint;
-              const amount = parsedInfo.tokenAmount.uiAmount;
-
-              // Determine symbol
-              let symbol = "Unknown";
-
-              // Check against project token mint
-              if (mintAddress === tokenMint.toBase58()) {
-                // Use project symbol if available
-                symbol = projectData?.symbol || "Token";
-              } else if (
-                mintAddress === "So11111111111111111111111111111111111111112"
-              ) {
-                symbol = "SOL";
-              } else if (
-                mintAddress === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-              ) {
-                symbol = "USDC";
-              }
-
-              return {
-                symbol,
-                balance: amount,
-                mint: mintAddress,
-              };
-            })
-            .filter((t) => t.balance > 0);
-
-          // Add SPL tokens to the list
-          tokens = [...tokens, ...spl_tokens];
-        } catch (err) {
-          console.warn("Failed to parse SPL token accounts:", err);
-        }
-      } else {
-        console.warn("Failed to fetch token accounts or timed out");
-      }
+      // Token accounts will be processed after we calculate locked amounts (see below)
 
       // Get total allocated from database (Scoped to project if applicable)
       // GROUP BY token_mint for multi-token support
@@ -421,18 +374,109 @@ export class TreasuryController {
 
       // Calculate metrics
       const remainingNeeded = totalAllocated - totalClaimed;
-      const buffer = treasuryBalance - remainingNeeded;
+      
+      // For health check, determine which token is actually being used in active pools
+      // Check if any active pools use SOL (we fetched allocations above, grouped by token_mint)
+      // If allocations exist and are for SOL, use SOL balance; otherwise use the project's token balance
+      const { data: poolTokenCheck } = await this.dbService.supabase
+        .from("vesting_streams")
+        .select("token_mint")
+        .eq("is_active", true)
+        .eq("project_id", projectId || "")
+        .limit(1)
+        .single();
+      
+      const actualPoolTokenMint = poolTokenCheck?.token_mint || tokenMint.toBase58();
+      const isNativeSOL = actualPoolTokenMint === "So11111111111111111111111111111111111111112";
+      const actualBalance = isNativeSOL ? solBalance : treasuryBalance;
+      
+      // Calculate locked amounts per token mint (from allocationsByToken Map)
+      const lockedPerToken: Record<string, number> = {};
+      allocationsByToken.forEach((amount, mint) => {
+        lockedPerToken[mint] = amount;
+      });
+
+      // Now add tokens with AVAILABLE balance (total - locked)
+      const solMint = "So11111111111111111111111111111111111111112";
+      const solLocked = lockedPerToken[solMint] || 0;
+      const solAvailable = Math.max(0, solBalance - solLocked);
+      
+      tokens.push({
+        symbol: "SOL",
+        balance: solAvailable, // ✅ Show available balance, not total
+        mint: solMint,
+      });
+
+      // Add SPL tokens with available balances
+      if (tokenAccountsResult.status === 'fulfilled' && tokenAccountsResult.value) {
+        try {
+          const tokenAccounts = tokenAccountsResult.value;
+
+          const spl_tokens = tokenAccounts.value
+            .map((accountInfo) => {
+              const parsedInfo = accountInfo.account.data.parsed.info;
+              const mintAddress = parsedInfo.mint;
+              const totalAmount = parsedInfo.tokenAmount.uiAmount;
+
+              // Skip wrapped SOL - we already added native SOL balance above
+              if (mintAddress === solMint) {
+                return null;
+              }
+
+              // Calculate available balance for this token
+              const locked = lockedPerToken[mintAddress] || 0;
+              const available = Math.max(0, totalAmount - locked);
+
+              // Determine symbol
+              let symbol = "Unknown";
+              if (mintAddress === tokenMint.toBase58()) {
+                symbol = projectData?.symbol || "Token";
+              } else if (mintAddress === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") {
+                symbol = "USDC";
+              }
+
+              return {
+                symbol,
+                balance: available, // ✅ Show available balance, not total
+                mint: mintAddress,
+              };
+            })
+            .filter((t): t is { symbol: string; balance: number; mint: string } => t !== null && t.balance > 0);
+
+          tokens = [...tokens, ...spl_tokens];
+        } catch (err) {
+          console.warn("Failed to parse SPL token accounts:", err);
+        }
+      }
+      
+      // Use available balance (not locked in pools) for health check
+      const lockedInPools = totalAllocated; // Total allocated across all pools
+      const availableBalance = Math.max(0, actualBalance - lockedInPools);
+      const buffer = availableBalance - remainingNeeded;
       const bufferPercentage =
         remainingNeeded > 0 ? (buffer / remainingNeeded) * 100 : 0;
 
-      // Determine status
+      console.log('[TREASURY STATUS] Health calculation:', {
+        tokenMint: tokenMint.toBase58(),
+        isNativeSOL,
+        actualBalance,
+        lockedInPools,
+        availableBalance,
+        remainingNeeded,
+        buffer,
+        status: availableBalance >= remainingNeeded * 1.2 ? 'healthy' : availableBalance >= remainingNeeded ? 'warning' : 'critical'
+      });
+
+      // Determine status based on available balance vs what's still needed for active pools
       let status: "healthy" | "warning" | "critical";
-      if (buffer >= remainingNeeded * 0.2) {
-        status = "healthy"; // 20%+ buffer
-      } else if (buffer >= 0) {
-        status = "warning"; // Some buffer but less than 20%
+      if (remainingNeeded === 0) {
+        status = "healthy"; // All allocations claimed, no outstanding obligations
+      } else if (availableBalance >= remainingNeeded * 1.2) {
+        status = "healthy"; // 20%+ buffer over what's needed
+      } else if (availableBalance >= remainingNeeded) {
+        status = "warning"; // Just enough but tight
       } else {
-        status = "critical"; // Insufficient funds
+        status = "critical"; // Insufficient available balance for remaining allocations
       }
 
       // Get Streamflow pool info if deployed

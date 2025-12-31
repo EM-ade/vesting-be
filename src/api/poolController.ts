@@ -613,10 +613,18 @@ export class PoolController {
           // const tokenMint = ... (removed redundant declaration)
 
           // PRE-DEPLOYMENT VERIFICATION: Check treasury has sufficient funds
-          console.log('[STREAMFLOW] Verifying treasury has sufficient funds before deployment...');
+          console.log(`[STREAMFLOW] Verifying treasury has sufficient funds before deployment... (funding source: ${actualFundingSource})`);
           
           const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
           const isNativeSOL = tokenMint.toBase58() === NATIVE_SOL_MINT;
+          
+          // If funding from treasury, tokens are already there - just verify balance
+          // If funding from wallet, we would need to transfer (but that's not implemented yet)
+          if (actualFundingSource === 'treasury') {
+            console.log('[STREAMFLOW] Using treasury funding - tokens already in treasury, verifying sufficient balance...');
+          } else {
+            console.log('[STREAMFLOW] Using wallet funding - will use treasury balance (wallet transfer not implemented)');
+          }
 
           // Only create ATA for SPL tokens, not for Native SOL (wSOL wrapping handles it differently)
           if (!isNativeSOL) {

@@ -39,7 +39,7 @@ export async function requireAdmin(req: Request, res: Response, next: NextFuncti
     // 2. VALIDATE TIMESTAMP (prevent replay attacks)
     const now = Date.now();
     const messageTime = parseInt(timestamp);
-    const MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
+    const MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes (reasonable session duration)
 
     if (isNaN(messageTime)) {
       return res.status(401).json({
@@ -50,7 +50,7 @@ export async function requireAdmin(req: Request, res: Response, next: NextFuncti
     if (Math.abs(now - messageTime) > MAX_AGE_MS) {
       return res.status(401).json({
         error: "Authentication expired. Please reconnect wallet.",
-        hint: "Signatures are valid for 5 minutes to prevent replay attacks"
+        hint: "Signatures are valid for 30 minutes to prevent replay attacks"
       });
     }
 
