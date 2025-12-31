@@ -435,7 +435,13 @@ export class PoolController {
         manual_allocations, // Array of {wallet, amount, tier?, note?} for manual mode
         skipStreamflow, // Optional: skip Streamflow deployment
         claim_fee_lamports, // Pool-specific claim fee in lamports
+        funding_source, // NEW: 'wallet' | 'treasury' - where to get tokens from
       } = req.body;
+
+      // Default to 'wallet' for backward compatibility
+      const actualFundingSource = funding_source || 'wallet';
+      
+      console.log(`[POOL CREATION] Funding source: ${actualFundingSource}`);
 
       if (!name || !total_pool_amount || vesting_duration_days === undefined) {
         return res.status(400).json({

@@ -40,7 +40,11 @@
     "test:create-cliff-pool": "ts-node scripts/createCliffTestPool.ts",
     "pool:create-manual": "ts-node scripts/createManualPool.ts",
     "test:cancelled-members": "ts-node scripts/testCancelledMembersFix.ts",
-    "cleanup:cancelled-members": "ts-node scripts/cleanupCancelledMembers.ts"
+    "cleanup:cancelled-members": "ts-node scripts/cleanupCancelledMembers.ts",
+    "migrate:infisical": "ts-node scripts/migrateToInfisical.ts",
+    "test:infisical-integration": "ts-node scripts/testInfisicalIntegration.ts",
+    "infisical:health": "ts-node -e \"require('./src/services/infisicalService').healthCheck().then((ok: boolean) => { console.log(ok ? '✅ Healthy' : '❌ Unhealthy'); process.exit(ok ? 0 : 1); })\"",
+    "infisical:list-keys": "ts-node -e \"require('./src/services/infisicalService').listTreasuryKeys().then((keys: string[]) => { console.log('Treasury keys in Infisical:', keys); })\""
   },
   "dependencies": {
     "@chakra-ui/icons": "^2.2.4",
@@ -49,6 +53,7 @@
     "@coral-xyz/anchor": "^0.32.1",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
+    "@infisical/sdk": "^4.0.6",
     "@metaplex-foundation/js": "^0.19.4",
     "@pythnetwork/client": "^2.22.1",
     "@solana/spl-token": "^0.4.8",

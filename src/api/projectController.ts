@@ -18,11 +18,28 @@ export class ProjectController {
 
       // If wallet provided, filter by user access
       if (walletAddress) {
-        // Get projects where user has access (use two queries for now - JOIN syntax might vary by Supabase version)
-        const { data: accessRecords, error: accessError } = await supabase
-          .from('user_project_access')
-          .select('project_id')
-          .eq('wallet_address', walletAddress);
+        // Get projects where user has access with retry logic for transient network errors
+        let accessRecords = null;
+        let accessError = null;
+        let retries = 3;
+        
+        while (retries > 0 && !accessRecords) {
+          const result = await supabase
+            .from('user_project_access')
+            .select('project_id')
+            .eq('wallet_address', walletAddress);
+          
+          accessRecords = result.data;
+          accessError = result.error;
+          
+          if (accessError && retries > 1) {
+            console.warn(`Retry attempt ${4 - retries} for user access fetch...`);
+            await new Promise(resolve => setTimeout(resolve, 500)); // Wait 500ms before retry
+            retries--;
+          } else {
+            break;
+          }
+        }
 
         if (accessError) {
           console.error('Failed to fetch user access records:', accessError);

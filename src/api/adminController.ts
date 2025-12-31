@@ -1,6 +1,10 @@
 import { Request, Response } from 'express';
 import { SupabaseService } from '../services/supabaseService';
 import { getSupabaseClient } from '../lib/supabaseClient';
+import { TreasuryController } from './treasuryController';
+import { PoolController } from './poolController';
+import { ClaimsController } from './claimsController';
+import { MetricsController } from './metricsController';
 
 /**
  * Admin API Controller
@@ -8,10 +12,18 @@ import { getSupabaseClient } from '../lib/supabaseClient';
  */
 export class AdminController {
   private dbService: SupabaseService;
+  private treasuryController: TreasuryController;
+  private poolController: PoolController;
+  private claimsController: ClaimsController;
+  private metricsController: MetricsController;
 
   constructor() {
     const supabaseClient = getSupabaseClient();
     this.dbService = new SupabaseService(supabaseClient);
+    this.treasuryController = new TreasuryController();
+    this.poolController = new PoolController();
+    this.claimsController = new ClaimsController();
+    this.metricsController = new MetricsController();
   }
 
   /**
@@ -239,5 +251,209 @@ export class AdminController {
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+  }
+
+  /**
+   * GET /api/admin/dashboard-batch
+   * Batch endpoint that consolidates multiple dashboard API calls into one
+   * Reduces network roundtrips from 5-6 calls to 1 single call
+   * SECURITY: Verifies project access
+   */
+  async getDashboardBatch(req: Request, res: Response) {
+    try {
+      const projectId = req.projectId || (req.query.projectId as string);
+      const poolIds = req.query.poolIds as string;
+      const claimsLimit = parseInt(req.query.claimsLimit as string) || 8;
+      const activityLimit = parseInt(req.query.activityLimit as string) || 20;
+
+      if (!projectId) {
+        return res.status(400).json({ 
+          success: false,
+          error: 'Project ID is required' 
+        });
+      }
+
+      // Execute all data fetches in parallel for maximum performance
+      const [
+        treasuryResult,
+        poolsResult,
+        claimsResult,
+        eligibleWalletsResult,
+        activityLogResult
+      ] = await Promise.allSettled([
+        // Treasury status
+        this.fetchTreasuryStatus(req, projectId, poolIds),
+        
+        // Pools list
+        this.fetchPools(req),
+        
+        // Recent claims
+        this.fetchClaims(req, projectId, claimsLimit, poolIds),
+        
+        // Eligible wallets count
+        this.fetchEligibleWallets(req, projectId, poolIds),
+        
+        // Activity log
+        this.fetchActivityLog(req, activityLimit, poolIds)
+      ]);
+
+      // Extract data from settled promises
+      const treasury = treasuryResult.status === 'fulfilled' ? treasuryResult.value : null;
+      const pools = poolsResult.status === 'fulfilled' ? poolsResult.value : [];
+      const claims = claimsResult.status === 'fulfilled' ? claimsResult.value : { claims: [] };
+      const eligibleWallets = eligibleWalletsResult.status === 'fulfilled' ? eligibleWalletsResult.value : { count: 0 };
+      const activityLog = activityLogResult.status === 'fulfilled' ? activityLogResult.value : { activities: [] };
+
+      // Log any failures for debugging
+      const failures = [
+        { name: 'treasury', result: treasuryResult },
+        { name: 'pools', result: poolsResult },
+        { name: 'claims', result: claimsResult },
+        { name: 'eligibleWallets', result: eligibleWalletsResult },
+        { name: 'activityLog', result: activityLogResult }
+      ].filter(({ result }) => result.status === 'rejected');
+
+      if (failures.length > 0) {
+        console.warn('Dashboard batch - some requests failed:', 
+          failures.map(f => ({ 
+            name: f.name, 
+            reason: f.result.status === 'rejected' ? f.result.reason : null 
+          }))
+        );
+      }
+
+      // Return consolidated response
+      res.json({
+        success: true,
+        data: {
+          treasury,
+          pools,
+          claims,
+          eligibleWallets,
+          activityLog
+        },
+        timestamp: Date.now(),
+        cached: false,
+        partialFailures: failures.length > 0 ? failures.map(f => f.name) : undefined
+      });
+    } catch (error) {
+      console.error('Failed to fetch dashboard batch:', error);
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  /**
+   * Helper method to fetch treasury status
+   */
+  private async fetchTreasuryStatus(req: Request, projectId: string, poolIds?: string) {
+    // Create a mock response object to capture the controller's output
+    let capturedData: any = null;
+    const mockRes = {
+      json: (data: any) => { capturedData = data; },
+      status: () => mockRes
+    } as any;
+
+    // Create a new request-like object
+    const mockReq = {
+      ...req,
+      projectId,
+      query: {
+        projectId,
+        poolIds
+      }
+    } as any;
+
+    await this.treasuryController.getTreasuryStatus(mockReq, mockRes);
+    return capturedData;
+  }
+
+  /**
+   * Helper method to fetch pools
+   */
+  private async fetchPools(req: Request) {
+    let capturedData: any = null;
+    const mockRes = {
+      json: (data: any) => { capturedData = data; },
+      status: () => mockRes
+    } as any;
+
+    // Use original request for pools (no modifications needed)
+    await this.poolController.listPools(req, mockRes);
+    return capturedData;
+  }
+
+  /**
+   * Helper method to fetch claims
+   */
+  private async fetchClaims(req: Request, projectId: string, limit: number, poolIds?: string) {
+    let capturedData: any = null;
+    const mockRes = {
+      json: (data: any) => { capturedData = data; },
+      status: () => mockRes
+    } as any;
+
+    // Create a new request-like object
+    const mockReq = {
+      ...req,
+      projectId,
+      query: {
+        projectId,
+        limit: limit.toString(),
+        poolIds
+      }
+    } as any;
+
+    await this.claimsController.listClaims(mockReq, mockRes);
+    return capturedData;
+  }
+
+  /**
+   * Helper method to fetch eligible wallets
+   */
+  private async fetchEligibleWallets(req: Request, projectId: string, poolIds?: string) {
+    let capturedData: any = null;
+    const mockRes = {
+      json: (data: any) => { capturedData = data; },
+      status: () => mockRes
+    } as any;
+
+    // Create a new request-like object
+    const mockReq = {
+      ...req,
+      projectId,
+      query: {
+        projectId,
+        poolIds
+      }
+    } as any;
+
+    await this.metricsController.getEligibleWalletsEndpoint(mockReq, mockRes);
+    return capturedData;
+  }
+
+  /**
+   * Helper method to fetch activity log
+   */
+  private async fetchActivityLog(req: Request, limit: number, poolIds?: string) {
+    let capturedData: any = null;
+    const mockRes = {
+      json: (data: any) => { capturedData = data; },
+      status: () => mockRes
+    } as any;
+
+    // Create a new request-like object
+    const mockReq = {
+      ...req,
+      query: {
+        limit: limit.toString(),
+        poolIds
+      }
+    } as any;
+
+    await this.metricsController.getActivityLog(mockReq, mockRes);
+    return capturedData;
   }
 }

@@ -106,8 +106,7 @@ export const deduplicator = new RequestDeduplicator();
 
 /**
  * Express middleware for request deduplication
- * Simplified version - just logs and passes through
- * Full caching can be added later if needed
+ * SECURITY: Prevents duplicate claim requests from being processed
  */
 export function deduplicationMiddleware(req: any, res: any, next: any) {
   const wallet = req.body?.userWallet;
@@ -117,9 +116,44 @@ export function deduplicationMiddleware(req: any, res: any, next: any) {
     return next();
   }
 
-  // Log for monitoring
-  console.log(`[DEDUP] Request from ${wallet} on ${endpoint}`);
+  // Check if request is already in flight
+  if (deduplicator.isInFlight(wallet, endpoint, req.body)) {
+    console.log(`[DEDUP] ⚠️ Duplicate request blocked from ${wallet} on ${endpoint}`);
+    return res.status(429).json({
+      error: 'Duplicate request detected',
+      message: 'A request with the same parameters is already being processed. Please wait.',
+    });
+  }
 
-  // Always continue to next middleware/handler
+  // Check for cached response (recently completed request)
+  const cachedResponse = deduplicator.getCachedResponse(wallet, endpoint, req.body);
+  if (cachedResponse) {
+    console.log(`[DEDUP] 📦 Returning cached response for ${wallet} on ${endpoint}`);
+    return res.status(200).json(cachedResponse);
+  }
+
+  // Mark request as in-flight
+  deduplicator.markInFlight(wallet, endpoint, req.body);
+  console.log(`[DEDUP] ✓ New request from ${wallet} on ${endpoint}`);
+
+  // Override res.json to cache the response
+  const originalJson = res.json.bind(res);
+  res.json = function(data: any) {
+    // Cache successful responses only
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      deduplicator.markCompleted(wallet, endpoint, req.body, data);
+    }
+    return originalJson(data);
+  };
+
   next();
 }
+
+// Cleanup expired entries every minute
+setInterval(() => {
+  deduplicator.cleanup();
+  const size = deduplicator.size();
+  if (size > 0) {
+    console.log(`[DEDUP] Cache size: ${size} entries`);
+  }
+}, 60000);

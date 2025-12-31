@@ -1,24 +1,94 @@
 import { Request, Response, NextFunction } from "express";
+import { PublicKey } from "@solana/web3.js";
+import nacl from "tweetnacl";
+import bs58 from "bs58";
 
 /**
- * Admin Authentication Middleware
- * Verifies that the request comes from an authorized admin wallet
- * Admin wallets are configured via ADMIN_WALLETS environment variable
+ * Admin Authentication Middleware with Cryptographic Signature Verification
+ * SECURITY: Requires wallet signature to prove ownership
+ * Prevents: Wallet address impersonation attacks
+ * 
+ * Required request body fields:
+ * - adminWallet: Solana wallet address
+ * - signature: Base58-encoded ed25519 signature
+ * - message: Message that was signed
+ * - timestamp: Unix timestamp (ms) of signature creation
  */
-export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+export async function requireAdmin(req: Request, res: Response, next: NextFunction) {
   try {
-    // Get admin wallet from request (query for GET, body for POST/PUT)
-    const adminWallet = req.body?.adminWallet || req.query?.adminWallet;
+    // 1. EXTRACT AUTHENTICATION DATA
+    const { adminWallet, signature, message, timestamp } = req.body;
 
-    // Check if admin wallet is provided
-    if (!adminWallet || typeof adminWallet !== "string") {
+    // Allow query params for GET requests (but still require signature in body for security)
+    const walletAddress = adminWallet || req.query?.adminWallet;
+
+    if (!walletAddress || !signature || !message || !timestamp) {
       return res.status(401).json({
-        error:
-          "Admin authentication required. Please provide adminWallet parameter.",
+        error: "Missing authentication: adminWallet, signature, message, and timestamp required",
+        hint: "Frontend must sign message with wallet before making admin requests"
       });
     }
 
-    // Get admin wallets from environment variable
+    // Check if admin wallet is provided
+    if (typeof walletAddress !== "string") {
+      return res.status(401).json({
+        error: "Admin authentication required. Please provide adminWallet parameter.",
+      });
+    }
+
+    // 2. VALIDATE TIMESTAMP (prevent replay attacks)
+    const now = Date.now();
+    const messageTime = parseInt(timestamp);
+    const MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes
+
+    if (isNaN(messageTime)) {
+      return res.status(401).json({
+        error: "Invalid timestamp format"
+      });
+    }
+
+    if (Math.abs(now - messageTime) > MAX_AGE_MS) {
+      return res.status(401).json({
+        error: "Authentication expired. Please reconnect wallet.",
+        hint: "Signatures are valid for 5 minutes to prevent replay attacks"
+      });
+    }
+
+    // 3. VERIFY MESSAGE FORMAT
+    const expectedMessage = `Authenticate as admin\nWallet: ${walletAddress}\nTimestamp: ${timestamp}`;
+    if (message !== expectedMessage) {
+      return res.status(401).json({
+        error: "Invalid message format",
+        expected: expectedMessage
+      });
+    }
+
+    // 4. VERIFY SIGNATURE (cryptographic proof of wallet ownership)
+    try {
+      const publicKey = new PublicKey(walletAddress);
+      const messageBytes = new TextEncoder().encode(message);
+      const signatureBytes = bs58.decode(signature);
+
+      const isValid = nacl.sign.detached.verify(
+        messageBytes,
+        signatureBytes,
+        publicKey.toBytes()
+      );
+
+      if (!isValid) {
+        return res.status(401).json({
+          error: "Invalid signature. Signature verification failed."
+        });
+      }
+    } catch (err) {
+      console.error("Signature verification error:", err);
+      return res.status(401).json({
+        error: "Signature verification failed",
+        details: err instanceof Error ? err.message : "Unknown error"
+      });
+    }
+
+    // 5. CHECK SUPER ADMIN (signature already verified)
     const adminWalletsEnv = process.env.ADMIN_WALLETS || "";
 
     // Parse comma-separated list of admin wallets
@@ -27,51 +97,48 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
       .map((w) => w.trim())
       .filter((w) => w.length > 0);
 
-    if (adminWallets.includes(adminWallet)) {
+    if (adminWallets.includes(walletAddress)) {
+      console.log(`✅ Super admin authenticated: ${walletAddress}`);
       return next();
     }
 
-    // If not a super-admin, check database for project access
+    // 6. CHECK PROJECT-LEVEL ACCESS (signature already verified)
     const projectId =
       (req.headers["x-project-id"] as string) ||
       req.body?.projectId ||
       req.query?.projectId;
 
-    if (projectId) {
-      const { getSupabaseClient } = require("../lib/supabaseClient");
-      const supabase = getSupabaseClient();
+    if (!projectId) {
+      return res.status(403).json({
+        error: "Project ID required for non-super-admin access",
+        hint: "Provide projectId in query, body, or x-project-id header"
+      });
+    }
 
-      // Check user_project_access table using wallet_address
-      // Note: This requires the middleware to be async, but Express middlewares can return promises.
-      // However, to be safe with sync signature, we wrap it in a promise or use async middleware pattern.
-      // Since we can't easily change signature to async here without ensuring express 5 or wrapper,
-      // we will use the promise chain or assume express 5 (which handles async errors).
-      // backend/package.json shows "express": "^5.1.0", so async middleware is supported!
+    const { getSupabaseClient } = require("../lib/supabaseClient");
+    const supabase = getSupabaseClient();
 
-      return (async () => {
-        try {
-          const { data: access } = await supabase
-            .from("user_project_access")
-            .select("role")
-            .eq("project_id", projectId)
-            .eq("wallet_address", adminWallet)
-            .single();
+    try {
+      const { data: access } = await supabase
+        .from("user_project_access")
+        .select("role")
+        .eq("project_id", projectId)
+        .eq("wallet_address", walletAddress)
+        .single();
 
-          if (access && (access.role === "admin" || access.role === "owner")) {
-            return next();
-          }
+      if (access && (access.role === "admin" || access.role === "owner")) {
+        console.log(`✅ Project admin authenticated: ${walletAddress} for project ${projectId}`);
+        return next();
+      }
 
-          return res.status(403).json({
-            error:
-              "Access denied. This wallet is not authorized as an admin for this project.",
-          });
-        } catch (err) {
-          console.error("Database check failed in auth middleware:", err);
-          return res
-            .status(500)
-            .json({ error: "Internal authentication error" });
-        }
-      })();
+      return res.status(403).json({
+        error: "Access denied. This wallet is not authorized as an admin for this project.",
+      });
+    } catch (err) {
+      console.error("Database check failed in auth middleware:", err);
+      return res
+        .status(500)
+        .json({ error: "Internal authentication error" });
     }
 
     if (!adminWalletsEnv) {

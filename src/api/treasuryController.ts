@@ -1,10 +1,11 @@
 import { Request, Response } from "express";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
-import { getAssociatedTokenAddress, getAccount } from "@solana/spl-token";
+import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { getAssociatedTokenAddress, getAccount, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import bs58 from "bs58";
 import { SupabaseService } from "../services/supabaseService";
 import { config } from "../config";
 import { getSupabaseClient } from "../lib/supabaseClient";
+import { getVaultKeypairForProject } from "../services/vaultService";
 
 /**
  * Treasury Management API Controller
@@ -796,6 +797,111 @@ export class TreasuryController {
   }
 
   /**
+   * GET /api/treasury/tokens
+   * Get all tokens in treasury with balances (minus locked amounts in pools)
+   */
+  async getTreasuryTokens(req: Request, res: Response) {
+    try {
+      const projectId = req.query.projectId as string;
+
+      if (!projectId) {
+        return res.status(400).json({ error: "projectId is required" });
+      }
+
+      // Get project's treasury keypair
+      const treasuryKeypair = await getVaultKeypairForProject(projectId);
+      const treasuryPublicKey = treasuryKeypair.publicKey;
+
+      const connection = new Connection(config.rpcEndpoint, "confirmed");
+
+      // Get locked amounts per token from active pools
+      const { data: activePools, error: poolError } = await this.dbService.supabase
+        .from("vesting_streams")
+        .select("token_mint, total_pool_amount")
+        .eq("project_id", projectId)
+        .eq("is_active", true);
+
+      if (poolError) {
+        console.error("Error fetching active pools:", poolError);
+      }
+
+      // Calculate locked amounts per token
+      const lockedAmounts: Record<string, number> = {};
+      if (activePools) {
+        for (const pool of activePools) {
+          const mint = pool.token_mint || "So11111111111111111111111111111111111111112"; // Default to SOL
+          lockedAmounts[mint] = (lockedAmounts[mint] || 0) + pool.total_pool_amount;
+        }
+      }
+
+      // Get SOL balance
+      const solBalance = await connection.getBalance(treasuryPublicKey);
+      const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
+      const solLocked = lockedAmounts["So11111111111111111111111111111111111111112"] || 0;
+      const solAvailable = Math.max(0, solBalanceInSOL - solLocked);
+
+      // Get all token accounts
+      const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+        treasuryPublicKey,
+        { programId: TOKEN_PROGRAM_ID }
+      );
+
+      const tokens = [];
+
+      // Add SOL (only if there's available balance)
+      if (solAvailable > 0 || solBalanceInSOL > 0) {
+        tokens.push({
+          mint: "So11111111111111111111111111111111111111112",
+          symbol: "SOL",
+          name: "Solana",
+          decimals: 9,
+          balance: solAvailable, // Available balance (minus locked)
+          totalBalance: solBalanceInSOL, // Total balance in treasury
+          lockedBalance: solLocked, // Amount locked in pools
+          balanceRaw: (solAvailable * LAMPORTS_PER_SOL).toString(),
+          logoURI: "https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png"
+        });
+      }
+
+      // Add SPL tokens
+      for (const account of tokenAccounts.value) {
+        const parsedInfo = account.account.data.parsed.info;
+        const mint = parsedInfo.mint;
+        const totalAmount = parsedInfo.tokenAmount.uiAmount || 0;
+        const decimals = parsedInfo.tokenAmount.decimals;
+        const locked = lockedAmounts[mint] || 0;
+        const available = Math.max(0, totalAmount - locked);
+
+        // Only include tokens with available balance
+        if (available > 0 || totalAmount > 0) {
+          tokens.push({
+            mint,
+            symbol: mint.slice(0, 4) + "..." + mint.slice(-4), // Fallback symbol
+            name: "Unknown Token",
+            decimals,
+            balance: available, // Available balance (minus locked)
+            totalBalance: totalAmount, // Total balance in treasury
+            lockedBalance: locked, // Amount locked in pools
+            balanceRaw: (available * Math.pow(10, decimals)).toString(),
+          });
+        }
+      }
+
+      return res.json({
+        success: true,
+        treasuryAddress: treasuryPublicKey.toBase58(),
+        tokens,
+      });
+    } catch (err: any) {
+      console.error("Error fetching treasury tokens:", err);
+      return res.status(500).json({
+        error: "Failed to fetch treasury tokens",
+        details: err.message,
+      });
+    }
+  }
+
+  /**
    * GET /api/treasury/available
    * Get available balance for withdrawal (total - locked)
    */
@@ -824,6 +930,13 @@ export class TreasuryController {
       }
 
       const mintToUse = tokenMint || project.mint_address;
+
+      if (!mintToUse) {
+        return res.status(400).json({ 
+          error: "Token mint required", 
+          hint: "Project has no default mint address. Please provide tokenMint parameter." 
+        });
+      }
 
       const balanceInfo = await calculateAvailableBalance(
         projectId,
