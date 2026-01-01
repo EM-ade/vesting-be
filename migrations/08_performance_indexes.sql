@@ -71,12 +71,40 @@ CREATE INDEX IF NOT EXISTS idx_admin_logs_action_project
   ON admin_logs(action, (details->>'project_id'), created_at DESC);
 
 -- ============================================================================
+-- INDEX 9: user_project_access - wallet address lookup (CRITICAL!)
+-- ============================================================================
+-- Speeds up: Project listing by wallet, authentication
+-- Usage: WHERE wallet_address = X
+-- This is THE most critical index for fast project loading!
+CREATE INDEX IF NOT EXISTS idx_user_project_access_wallet 
+  ON user_project_access(wallet_address);
+
+-- ============================================================================
+-- INDEX 10: user_project_access - composite for role filtering
+-- ============================================================================
+-- Speeds up: Admin checks, role-based queries
+-- Usage: WHERE wallet_address = X AND role = 'owner'
+CREATE INDEX IF NOT EXISTS idx_user_project_access_wallet_role 
+  ON user_project_access(wallet_address, role);
+
+-- ============================================================================
+-- INDEX 11: projects - active projects lookup
+-- ============================================================================
+-- Speeds up: Project listing, filtering active projects
+-- Usage: WHERE is_active = true
+CREATE INDEX IF NOT EXISTS idx_projects_active 
+  ON projects(is_active) 
+  WHERE is_active = true;
+
+-- ============================================================================
 -- Analyze tables to update statistics for query planner
 -- ============================================================================
 ANALYZE vesting_streams;
 ANALYZE vestings;
 ANALYZE claim_history;
 ANALYZE admin_logs;
+ANALYZE user_project_access;
+ANALYZE projects;
 
 -- ============================================================================
 -- OPTIONAL: Create RPC function for optimized claim aggregation
