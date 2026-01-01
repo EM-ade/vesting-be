@@ -258,6 +258,7 @@ export class AdminController {
    * Batch endpoint that consolidates multiple dashboard API calls into one
    * Reduces network roundtrips from 5-6 calls to 1 single call
    * SECURITY: Verifies project access
+   * PERFORMANCE: Parallel execution with timeout protection
    */
   async getDashboardBatch(req: Request, res: Response) {
     try {
@@ -273,6 +274,18 @@ export class AdminController {
         });
       }
 
+      // PERFORMANCE OPTIMIZATION: Add timeout protection to prevent hanging
+      const BATCH_TIMEOUT_MS = 15000; // 15 seconds max for entire batch
+      
+      const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+        return Promise.race([
+          promise,
+          new Promise<T>((_, reject) =>
+            setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+          ),
+        ]);
+      };
+
       // Execute all data fetches in parallel for maximum performance
       const [
         treasuryResult,
@@ -282,19 +295,39 @@ export class AdminController {
         activityLogResult
       ] = await Promise.allSettled([
         // Treasury status
-        this.fetchTreasuryStatus(req, projectId, poolIds),
+        withTimeout(
+          this.fetchTreasuryStatus(req, projectId, poolIds),
+          BATCH_TIMEOUT_MS,
+          'Treasury'
+        ),
         
         // Pools list
-        this.fetchPools(req),
+        withTimeout(
+          this.fetchPools(req),
+          BATCH_TIMEOUT_MS,
+          'Pools'
+        ),
         
         // Recent claims
-        this.fetchClaims(req, projectId, claimsLimit, poolIds),
+        withTimeout(
+          this.fetchClaims(req, projectId, claimsLimit, poolIds),
+          BATCH_TIMEOUT_MS,
+          'Claims'
+        ),
         
         // Eligible wallets count
-        this.fetchEligibleWallets(req, projectId, poolIds),
+        withTimeout(
+          this.fetchEligibleWallets(req, projectId, poolIds),
+          BATCH_TIMEOUT_MS,
+          'EligibleWallets'
+        ),
         
         // Activity log
-        this.fetchActivityLog(req, activityLimit, poolIds)
+        withTimeout(
+          this.fetchActivityLog(req, activityLimit, poolIds),
+          BATCH_TIMEOUT_MS,
+          'ActivityLog'
+        )
       ]);
 
       // Extract data from settled promises

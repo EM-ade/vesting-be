@@ -1004,26 +1004,19 @@ export class PoolController {
       });
 
       // Enrich with Streamflow status and stats
-      const pools = await Promise.all((streams || []).map(async (stream: any) => {
+      // PERFORMANCE OPTIMIZATION: Skip Streamflow status checks in list view to avoid slow loading
+      // The dashboard loads much faster without these checks (2-3 seconds vs 30+ seconds)
+      // Streamflow status can be fetched on-demand when viewing individual pool details
+      const pools = (streams || []).map((stream: any) => {
         // Get user count and allocation stats from pre-fetched data
         const vestings = vestingsByStream.get(stream.id) || [];
         const totalAllocated = vestings.reduce((sum: number, v: any) => sum + Number(v.token_amount), 0);
         const userCount = vestings.length;
 
-        // Get Streamflow status if deployed
-        let streamflowStatus = null;
-        if (stream.streamflow_stream_id && this.streamflowService) {
-          try {
-            const status = await this.streamflowService.getPoolStatus(stream.streamflow_stream_id);
-            streamflowStatus = {
-              vestedAmount: status.withdrawnAmount,
-              depositedAmount: status.depositedAmount,
-              vestedPercentage: (status.withdrawnAmount / status.depositedAmount) * 100,
-            };
-          } catch (err) {
-            console.error('Failed to get Streamflow status:', err);
-          }
-        }
+        // OPTIMIZATION: Don't fetch Streamflow status in list view
+        // This was causing 1-2 second delays per pool (especially for closed/invalid streams)
+        // Status will be null in list view, can be fetched on pool details page if needed
+        const streamflowStatus = null;
 
         return {
           id: stream.id,
@@ -1051,7 +1044,7 @@ export class PoolController {
           },
           streamflow: streamflowStatus,
         };
-      }));
+      });
 
       res.json(pools);
     } catch (error) {

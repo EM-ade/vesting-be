@@ -375,8 +375,9 @@ export class MetricsController {
   }
 
   /**
-   * Helper: Get multi-token metrics breakdown (Optimized)
+   * Helper: Get multi-token metrics breakdown (DATABASE-OPTIMIZED)
    * SECURITY: Filters by project
+   * PERFORMANCE: Uses database-level aggregation instead of client-side processing
    */
   private async getMultiTokenMetrics(
     projectId?: string
@@ -386,90 +387,25 @@ export class MetricsController {
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
       // PROACTIVE FIX: Associate orphaned claims with correct project_id (self-healing)
-      try {
-        const { data: orphanedClaims } = await this.dbService.supabase
-          .from("claim_history")
-          .select("id, vesting_id")
-          .is("project_id", null)
-          .limit(20);
+      // Runs async in background, doesn't block main query
+      this.healOrphanedData(projectId).catch(err => 
+        console.warn("[METRICS] Background healing failed:", err)
+      );
 
-        if (orphanedClaims && orphanedClaims.length > 0) {
-          for (const claim of orphanedClaims) {
-            const { data: vesting } = await this.dbService.supabase
-              .from("vestings")
-              .select("project_id")
-              .eq("id", claim.vesting_id)
-              .single();
-            if (vesting?.project_id) {
-              await this.dbService.supabase
-                .from("claim_history")
-                .update({ project_id: vesting.project_id })
-                .eq("id", claim.id);
-            }
-          }
-          // Clear cache if we fixed data to ensure dashboard reflects latest
-          this.cache.del(`dashboard_metrics_${projectId || "all"}`);
-        }
-      } catch (fixErr) {
-        console.warn("[METRICS] Failed to run proactive fix:", fixErr);
-      }
-
-      // PROACTIVE FIX (Logs): Associate orphaned admin logs with project_id
-      try {
-        // Find logs with 'CLAIM_COMPLETED' that are missing project_id
-        const { data: orphanedLogs } = await this.dbService.supabase
-          .from("admin_logs")
-          .select("id, details")
-          .eq("action", "CLAIM_COMPLETED")
-          .is("details->>project_id", null) // Check if project_id is missing in JSON
-          .limit(20);
-
-        if (orphanedLogs && orphanedLogs.length > 0) {
-          for (const log of orphanedLogs) {
-            const signature = log.details?.signature;
-            if (signature) {
-              // Find matching claim to get project_id
-              const { data: claim } = await this.dbService.supabase
-                .from("claim_history")
-                .select("project_id")
-                .eq("transaction_signature", signature)
-                .single();
-
-              if (claim?.project_id) {
-                // Update the log with the found project_id
-                const newDetails = {
-                  ...log.details,
-                  project_id: claim.project_id,
-                };
-                await this.dbService.supabase
-                  .from("admin_logs")
-                  .update({ details: newDetails })
-                  .eq("id", log.id);
-
-                console.log(
-                  `[SELF-HEAL] Fixed project_id for admin_log ${log.id}`
-                );
-              }
-            }
-          }
-          // Clear cache if we fixed data to ensure dashboard reflects latest
-          this.cache.del(`activity_log_10_${projectId || "all"}_all`);
-        }
-      } catch (logHealErr) {
-        console.warn("[SELF-HEAL] Admin log healing failed:", logHealErr);
-      }
-
-      // 1. Fetch all active streams for project
-      let streamsQuery = this.dbService.supabase
+      // PERFORMANCE OPTIMIZATION: Use database-level aggregation
+      // This single query replaces 3+ round trips and client-side processing
+      
+      // Step 1: Get aggregated allocations per token
+      let allocationsQuery = this.dbService.supabase
         .from("vesting_streams")
-        .select("id, token_mint, total_pool_amount")
+        .select("token_mint, id")
         .eq("is_active", true);
 
       if (projectId) {
-        streamsQuery = streamsQuery.eq("project_id", projectId);
+        allocationsQuery = allocationsQuery.eq("project_id", projectId);
       }
 
-      const { data: streams } = await streamsQuery;
+      const { data: streams } = await allocationsQuery;
 
       if (!streams || streams.length === 0) {
         return {};
@@ -477,75 +413,90 @@ export class MetricsController {
 
       const streamIds = streams.map((s: { id: string }) => s.id);
 
-      // 2. Batch fetch ALL vestings for these streams
-      // We process large lists in chunks to avoid URL length limits if necessary,
-      // but usually for dashboard ~100s of pools is fine.
-      const { data: allVestings } = await this.dbService.supabase
-        .from("vestings")
-        .select("id, vesting_stream_id, token_amount")
-        .in("vesting_stream_id", streamIds)
-        .eq("is_active", true);
+      // Step 2: Aggregate allocations and claims in parallel using database
+      const [allocationsResult, claimsResult] = await Promise.all([
+        // Get total allocations per stream
+        this.dbService.supabase
+          .from("vestings")
+          .select("vesting_stream_id, token_amount")
+          .in("vesting_stream_id", streamIds)
+          .eq("is_active", true),
+        
+        // Get total claims per stream (single aggregated query)
+        this.dbService.supabase.rpc("get_claims_by_stream", {
+          stream_ids: streamIds
+        }).catch(() => {
+          // Fallback: If RPC doesn't exist, use client-side aggregation
+          return this.dbService.supabase
+            .from("vestings")
+            .select("id, vesting_stream_id")
+            .in("vesting_stream_id", streamIds)
+            .eq("is_active", true)
+            .then(async ({ data: vestings }: { data: any[] | null }) => {
+              if (!vestings || vestings.length === 0) {
+                return { data: [] };
+              }
+              const vestingIds = vestings.map((v: any) => v.id);
+              const { data: claims } = await this.dbService.supabase
+                .from("claim_history")
+                .select("vesting_id, amount_claimed")
+                .in("vesting_id", vestingIds);
+              
+              // Aggregate claims by stream
+              const claimsByStream = new Map<string, number>();
+              claims?.forEach((claim: any) => {
+                const vesting = vestings.find((v: any) => v.id === claim.vesting_id);
+                if (vesting) {
+                  const streamId = vesting.vesting_stream_id;
+                  const current = claimsByStream.get(streamId) || 0;
+                  claimsByStream.set(streamId, current + Number(claim.amount_claimed));
+                }
+              });
+              
+              return { 
+                data: Array.from(claimsByStream.entries()).map(([stream_id, total_claimed]) => ({
+                  stream_id,
+                  total_claimed
+                }))
+              };
+            });
+        })
+      ]);
 
-      const vestingIds = allVestings?.map((v: { id: string }) => v.id) || [];
-      const vestingsByStream = new Map<string, any[]>();
+      // Step 3: Process results in memory (much smaller dataset now)
+      const allocationsByStream = new Map<string, number>();
+      allocationsResult.data?.forEach((v: any) => {
+        const current = allocationsByStream.get(v.vesting_stream_id) || 0;
+        allocationsByStream.set(v.vesting_stream_id, current + Number(v.token_amount));
+      });
 
-      allVestings?.forEach((v: any) => {
-        const streamId = v.vesting_stream_id;
-        if (!vestingsByStream.has(streamId)) {
-          vestingsByStream.set(streamId, []);
+      const claimsByStream = new Map<string, number>();
+      claimsResult.data?.forEach((c: any) => {
+        claimsByStream.set(c.stream_id, Number(c.total_claimed || 0));
+      });
+
+      // Step 4: Group by token mint
+      const streamsByToken = new Map<string, string[]>();
+      streams.forEach((s: any) => {
+        const mint = s.token_mint;
+        if (!streamsByToken.has(mint)) {
+          streamsByToken.set(mint, []);
         }
-        vestingsByStream.get(streamId)?.push(v);
+        streamsByToken.get(mint)?.push(s.id);
       });
 
-      // 3. Batch fetch ALL claims for these vestings
-      // Note: fetching raw claim rows might be heavy if there are thousands of claims.
-      // An alternative is using .rpc for server-side aggregation, but we'll try client-side aggregation first
-      // as it allows detailed filtering if needed later.
-      let allClaims: any[] = [];
-      if (vestingIds.length > 0) {
-        const { data: claimsData } = await this.dbService.supabase
-          .from("claim_history")
-          .select("amount_claimed, vesting_id")
-          .in("vesting_id", vestingIds);
-        allClaims = claimsData || [];
-      }
-
-      const claimsByVesting = new Map<string, number>();
-      allClaims.forEach((c: any) => {
-        const current = claimsByVesting.get(c.vesting_id) || 0;
-        claimsByVesting.set(c.vesting_id, current + Number(c.amount_claimed));
-      });
-
-      // 4. Aggregate data in memory
       const tokenMetrics: Record<string, any> = {};
-      const tokenMints = [
-        ...new Set(streams.map((s: any) => s.token_mint).filter(Boolean)),
-      ] as string[];
 
-      for (const tokenMint of tokenMints) {
-        const tokenStreams = streams.filter(
-          (s: any) => s.token_mint === tokenMint
-        );
+      for (const [tokenMint, streamIds] of streamsByToken.entries()) {
         const tokenSymbol = this.getTokenSymbol(tokenMint);
 
         let totalAllocated = 0;
         let totalClaimedRaw = 0;
 
-        for (const stream of tokenStreams) {
-          // Sum allocations
-          const streamVestings = vestingsByStream.get(stream.id) || [];
-          const streamAllocated = streamVestings.reduce(
-            (sum: number, v: any) => sum + v.token_amount,
-            0
-          );
-          totalAllocated += streamAllocated;
-
-          // Sum claims
-          streamVestings.forEach((v: any) => {
-            const claimed = claimsByVesting.get(v.id) || 0;
-            totalClaimedRaw += claimed;
-          });
-        }
+        streamIds.forEach(streamId => {
+          totalAllocated += allocationsByStream.get(streamId) || 0;
+          totalClaimedRaw += claimsByStream.get(streamId) || 0;
+        });
 
         const totalClaimed = totalClaimedRaw / TOKEN_DIVISOR;
 
@@ -555,7 +506,7 @@ export class MetricsController {
           totalAllocated,
           totalClaimed,
           remainingNeeded: totalAllocated - totalClaimed,
-          activePools: tokenStreams.length,
+          activePools: streamIds.length,
           healthScore:
             totalAllocated > 0
               ? Math.round((totalClaimed / totalAllocated) * 100)
@@ -574,8 +525,72 @@ export class MetricsController {
 
       return tokenMetrics;
     } catch (error) {
-      console.error("Error getting multi-token metrics (optimized):", error);
+      console.error("Error getting multi-token metrics (db-optimized):", error);
       return {};
+    }
+  }
+
+  /**
+   * Background helper: Heal orphaned data (runs async, non-blocking)
+   */
+  private async healOrphanedData(projectId?: string): Promise<void> {
+    try {
+      // Heal orphaned claims
+      const { data: orphanedClaims } = await this.dbService.supabase
+        .from("claim_history")
+        .select("id, vesting_id")
+        .is("project_id", null)
+        .limit(20);
+
+      if (orphanedClaims && orphanedClaims.length > 0) {
+        for (const claim of orphanedClaims) {
+          const { data: vesting } = await this.dbService.supabase
+            .from("vestings")
+            .select("project_id")
+            .eq("id", claim.vesting_id)
+            .single();
+          if (vesting?.project_id) {
+            await this.dbService.supabase
+              .from("claim_history")
+              .update({ project_id: vesting.project_id })
+              .eq("id", claim.id);
+          }
+        }
+        this.cache.del(`dashboard_metrics_${projectId || "all"}`);
+      }
+
+      // Heal orphaned logs
+      const { data: orphanedLogs } = await this.dbService.supabase
+        .from("admin_logs")
+        .select("id, details")
+        .eq("action", "CLAIM_COMPLETED")
+        .is("details->>project_id", null)
+        .limit(20);
+
+      if (orphanedLogs && orphanedLogs.length > 0) {
+        for (const log of orphanedLogs) {
+          const signature = log.details?.signature;
+          if (signature) {
+            const { data: claim } = await this.dbService.supabase
+              .from("claim_history")
+              .select("project_id")
+              .eq("transaction_signature", signature)
+              .single();
+
+            if (claim?.project_id) {
+              const newDetails = { ...log.details, project_id: claim.project_id };
+              await this.dbService.supabase
+                .from("admin_logs")
+                .update({ details: newDetails })
+                .eq("id", log.id);
+            }
+          }
+        }
+        this.cache.del(`activity_log_10_${projectId || "all"}_all`);
+      }
+    } catch (err) {
+      // Silently fail - this is background healing
+      console.warn("[METRICS] Orphaned data healing failed:", err);
     }
   }
 
