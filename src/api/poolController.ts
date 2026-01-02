@@ -701,8 +701,11 @@ export class PoolController {
               console.log(`[STREAMFLOW] SPL Token - Treasury token balance: ${tokenBalance}`);
               console.log(`[STREAMFLOW] Required tokens: ${requiredTokens} (${total_pool_amount} pool + 0.5% buffer)`);
               
-              if (tokenBalance < requiredTokens) {
-                throw new Error(`Treasury has insufficient tokens. Required: ${requiredTokens}, Available: ${tokenBalance}. Please fund the treasury before deploying.`);
+              // FLOATING POINT FIX: Use a small epsilon for comparison (0.001 tokens tolerance)
+              // Issue: 100499.999999999 vs 100499.99999999999 fails due to JS floating point precision
+              const EPSILON = 0.001;
+              if (tokenBalance < requiredTokens - EPSILON) {
+                throw new Error(`Treasury has insufficient tokens. Required: ${requiredTokens.toFixed(2)}, Available: ${tokenBalance.toFixed(2)}. Please fund the treasury before deploying.`);
               }
               console.log('[STREAMFLOW] ✅ Treasury has sufficient tokens');
             } catch (err) {
