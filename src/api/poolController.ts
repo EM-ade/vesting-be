@@ -143,10 +143,11 @@ export class PoolController {
         result.checks.timestamp.message = 'Start time is valid';
       }
 
-      // 2. Check SOL balance
-      const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
+      // 2. Check SOL balance (CACHE-BUSTING: Use 'confirmed' commitment for latest data)
+      const solBalance = await this.connection.getBalance(adminKeypair.publicKey, 'confirmed');
       const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
       result.checks.solBalance.current = solBalanceInSOL;
+      console.log(`[VALIDATION] Treasury SOL balance: ${solBalanceInSOL} SOL (fresh fetch with 'confirmed' commitment)`);
 
       // UPDATED: Base Streamflow requirement is ~0.013 SOL
       // Token account rent (~0.002 SOL) will be handled by the transaction if needed
@@ -182,11 +183,12 @@ export class PoolController {
         if (isNativeSOL) {
           // For native SOL, check the wallet's SOL balance directly (no token account needed)
           console.log(`[VALIDATION] Checking native SOL balance for treasury`);
-          const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
+          // CACHE-BUSTING: Use 'confirmed' commitment to get the latest balance after funding
+          const solBalance = await this.connection.getBalance(adminKeypair.publicKey, 'confirmed');
           const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
           result.checks.tokenBalance.current = solBalanceInSOL;
 
-          console.log(`[VALIDATION] Native SOL balance: ${solBalanceInSOL} SOL`);
+          console.log(`[VALIDATION] Native SOL balance (fresh with 'confirmed' commitment): ${solBalanceInSOL} SOL`);
 
           // For native SOL pools, we need:
           // 1. Pool amount + 0.5% buffer (will be locked in Streamflow)
