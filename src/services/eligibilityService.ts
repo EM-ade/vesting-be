@@ -1,6 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { HeliusNFTService } from './heliusNFTService';
-import { config } from '../config';
+import { config, getNetwork } from '../config';
 
 export interface AllocationRule {
   name: string;
@@ -30,7 +30,7 @@ export class EligibilityService {
     if (!config.heliusApiKey) {
       throw new Error('HELIUS_API_KEY is not configured');
     }
-    this.heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+    this.heliusService = new HeliusNFTService(config.heliusApiKey, getNetwork());
   }
 
   /**

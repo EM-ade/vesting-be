@@ -6,7 +6,7 @@ import { SupabaseService } from './supabaseService';
 import { VestingModeService } from './vestingModeService';
 import { HeliusNFTService } from './heliusNFTService';
 import { SnapshotResult, VestingConfig, VestingMode } from '../types';
-import { config } from '../config';
+import { config, getNetwork } from '../config';
 
 /**
  * Snapshot Vesting Service
@@ -58,7 +58,7 @@ export class SnapshotVestingService {
       // Check eligibility for each using Helius
       console.log('Checking eligibility...');
       const eligibleUsers: Array<{ wallet: string; nftCount: number; tier: number }> = [];
-      const helius = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+      const helius = new HeliusNFTService(config.heliusApiKey, getNetwork());
 
       for (const holder of holders) {
         try {
@@ -214,7 +214,7 @@ export class SnapshotVestingService {
       throw new Error('HELIUS_API_KEY not set in .env file');
     }
 
-    const helius = new HeliusNFTService(config.heliusApiKey, 'devnet');
+    const helius = new HeliusNFTService(config.heliusApiKey, getNetwork());
     
     try {
       const holders = await helius.getAllHolders(collectionAddress);
@@ -252,7 +252,7 @@ export class SnapshotVestingService {
       // Check eligibility for each wallet using Helius
       console.log('Checking eligibility...');
       const eligibleUsers: Array<{ wallet: string; nftCount: number; tier: number }> = [];
-      const helius = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+      const helius = new HeliusNFTService(config.heliusApiKey, getNetwork());
 
       for (const wallet of wallets) {
         try {

@@ -9,7 +9,7 @@
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { createClient } from '@supabase/supabase-js';
 import bs58 from 'bs58';
-import { config, getConnection } from './config';
+import { config, getConnection, getNetwork } from './config';
 import { SupabaseService } from './services/supabaseService';
 import { HeliusNFTService } from './services/heliusNFTService';
 
@@ -63,8 +63,9 @@ class PoolSyncDaemon {
     console.log('✅ Connected to Supabase');
 
     // Initialize Helius NFT service
-    this.nftService = new HeliusNFTService(config.heliusApiKey);
-    console.log('✅ Helius NFT service initialized');
+    const network = getNetwork();
+    this.nftService = new HeliusNFTService(config.heliusApiKey, network);
+    console.log(`✅ Helius NFT service initialized (${network})`);
 
     console.log(`✅ Sync interval: ${config.syncIntervalHours} hours\n`);
   }

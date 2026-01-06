@@ -4,7 +4,7 @@ import { HeliusNFTService } from '../services/heliusNFTService';
 import { SnapshotConfigService } from '../services/snapshotConfigService';
 import { SupabaseService } from '../services/supabaseService';
 import { SnapshotConfig } from '../types';
-import { config } from '../config';
+import { config, getNetwork } from '../config';
 import { getSupabaseClient } from '../lib/supabaseClient';
 
 /**
@@ -17,7 +17,7 @@ export class SnapshotController {
   private dbService: SupabaseService;
 
   constructor() {
-    this.heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+    this.heliusService = new HeliusNFTService(config.heliusApiKey, getNetwork());
     this.snapshotConfigService = new SnapshotConfigService(this.heliusService);
     const supabaseClient = getSupabaseClient();
     this.dbService = new SupabaseService(supabaseClient);

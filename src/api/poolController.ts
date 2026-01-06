@@ -2082,9 +2082,9 @@ export class PoolController {
       // Import snapshot services
       const { SnapshotConfigService } = await import('../services/snapshotConfigService');
       const { HeliusNFTService } = await import('../services/heliusNFTService');
-      const { config } = await import('../config');
+      const { config, getNetwork } = await import('../config');
 
-      const heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+      const heliusService = new HeliusNFTService(config.heliusApiKey, getNetwork());
       const snapshotConfigService = new SnapshotConfigService(heliusService);
 
       // Convert pool rules to snapshot config format

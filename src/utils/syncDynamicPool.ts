@@ -1,7 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { SupabaseService } from '../services/supabaseService';
 import { HeliusNFTService } from '../services/heliusNFTService';
-import { getConnection, config } from '../config';
+import { getConnection, config, getNetwork } from '../config';
 import { createClient } from '@supabase/supabase-js';
 
 /**
@@ -63,7 +63,7 @@ export async function syncDynamicPool(pool: any) {
       }
       
       console.log(`  🔍 Fetching NFT holders from Helius for ${nftContract.toBase58()}...`);
-      const heliusService = new HeliusNFTService(config.heliusApiKey, 'mainnet-beta');
+      const heliusService = new HeliusNFTService(config.heliusApiKey, getNetwork());
       
       let holders;
       try {

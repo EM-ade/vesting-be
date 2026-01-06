@@ -42,3 +42,8 @@ export const config = {
 
 export const getConnection = () =>
   new Connection(config.rpcEndpoint, "confirmed");
+
+export const getNetwork = (): 'devnet' | 'mainnet-beta' => {
+  const endpoint = config.rpcEndpoint.toLowerCase();
+  return endpoint.includes('devnet') ? 'devnet' : 'mainnet-beta';
+};
