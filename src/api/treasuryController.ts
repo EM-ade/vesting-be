@@ -908,6 +908,14 @@ export class TreasuryController {
       }
 
       // Add SPL tokens
+      const tokensToEnrich: Array<{
+        mint: string;
+        decimals: number;
+        totalAmount: number;
+        locked: number;
+        available: number;
+      }> = [];
+
       for (const account of tokenAccounts.value) {
         const parsedInfo = account.account.data.parsed.info;
         const mint = parsedInfo.mint;
@@ -918,17 +926,88 @@ export class TreasuryController {
 
         // Only include tokens with available balance
         if (available > 0 || totalAmount > 0) {
-          tokens.push({
-            mint,
-            symbol: mint.slice(0, 4) + "..." + mint.slice(-4), // Fallback symbol
-            name: "Unknown Token",
-            decimals,
-            balance: available, // Available balance (minus locked)
-            totalBalance: totalAmount, // Total balance in treasury
-            lockedBalance: locked, // Amount locked in pools
-            balanceRaw: (available * Math.pow(10, decimals)).toString(),
-          });
+          tokensToEnrich.push({ mint, decimals, totalAmount, locked, available });
         }
+      }
+
+      // Fetch metadata for unknown tokens using Helius DAS API
+      const heliusUrl = 'https://mainnet.helius-rpc.com/?api-key=a53cd9fb-465b-4ee6-a217-c33cdd15707d';
+      const tokenMetadata: Record<string, { symbol: string; name: string }> = {};
+
+      // Known tokens mapping
+      const knownTokens: Record<string, { symbol: string; name: string }> = {
+        'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': { symbol: 'USDC', name: 'USD Coin' },
+        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': { symbol: 'USDT', name: 'Tether USD' },
+        '2FcDPDTvdURqtyuH6WSBFs33hupeuYJAWy625KyXrWid': { symbol: 'GARG', name: 'GARG Token' },
+      };
+
+      // Fetch metadata in parallel for unknown tokens
+      const metadataPromises = tokensToEnrich.map(async (token) => {
+        // Check if it's a known token
+        if (knownTokens[token.mint]) {
+          tokenMetadata[token.mint] = knownTokens[token.mint];
+          return;
+        }
+
+        try {
+          const response = await fetch(heliusUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'treasury-tokens',
+              method: 'getAsset',
+              params: {
+                id: token.mint,
+                displayOptions: { showFungible: true }
+              }
+            })
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            const result = data.result;
+            
+            const symbol = result?.content?.metadata?.symbol || 
+                          result?.token_info?.symbol ||
+                          result?.content?.metadata?.name?.split(' ')[0] ||
+                          token.mint.slice(0, 4) + "..." + token.mint.slice(-4);
+            
+            const name = result?.content?.metadata?.name || 
+                        result?.token_info?.name ||
+                        'Unknown Token';
+
+            tokenMetadata[token.mint] = { symbol, name };
+          }
+        } catch (err) {
+          console.warn(`Failed to fetch metadata for ${token.mint}:`, err);
+          // Fallback to truncated mint
+          tokenMetadata[token.mint] = {
+            symbol: token.mint.slice(0, 4) + "..." + token.mint.slice(-4),
+            name: 'Unknown Token'
+          };
+        }
+      });
+
+      await Promise.allSettled(metadataPromises);
+
+      // Build final tokens array with enriched metadata
+      for (const token of tokensToEnrich) {
+        const metadata = tokenMetadata[token.mint] || {
+          symbol: token.mint.slice(0, 4) + "..." + token.mint.slice(-4),
+          name: 'Unknown Token'
+        };
+
+        tokens.push({
+          mint: token.mint,
+          symbol: metadata.symbol,
+          name: metadata.name,
+          decimals: token.decimals,
+          balance: token.available, // Available balance (minus locked)
+          totalBalance: token.totalAmount, // Total balance in treasury
+          lockedBalance: token.locked, // Amount locked in pools
+          balanceRaw: (token.available * Math.pow(10, token.decimals)).toString(),
+        });
       }
 
       return res.json({
