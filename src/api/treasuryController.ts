@@ -943,12 +943,16 @@ export class TreasuryController {
 
       // Fetch metadata in parallel for unknown tokens
       const metadataPromises = tokensToEnrich.map(async (token) => {
+        console.log(`[Treasury Tokens] Processing token: ${token.mint}`);
+        
         // Check if it's a known token
         if (knownTokens[token.mint]) {
+          console.log(`[Treasury Tokens] ${token.mint} is a known token: ${knownTokens[token.mint].symbol}`);
           tokenMetadata[token.mint] = knownTokens[token.mint];
           return;
         }
 
+        console.log(`[Treasury Tokens] Fetching metadata from Helius for: ${token.mint}`);
         try {
           const response = await fetch(heliusUrl, {
             method: 'POST',
@@ -965,8 +969,10 @@ export class TreasuryController {
           });
 
           if (response.ok) {
-            const data = await response.json();
+            const data: any = await response.json();
             const result = data.result;
+            
+            console.log(`[Treasury Tokens] Helius response for ${token.mint}:`, JSON.stringify(result, null, 2));
             
             const symbol = result?.content?.metadata?.symbol || 
                           result?.token_info?.symbol ||
@@ -977,10 +983,17 @@ export class TreasuryController {
                         result?.token_info?.name ||
                         'Unknown Token';
 
+            console.log(`[Treasury Tokens] Extracted symbol: "${symbol}", name: "${name}"`);
             tokenMetadata[token.mint] = { symbol, name };
+          } else {
+            console.warn(`[Treasury Tokens] Helius returned non-OK status for ${token.mint}:`, response.status);
+            tokenMetadata[token.mint] = {
+              symbol: token.mint.slice(0, 4) + "..." + token.mint.slice(-4),
+              name: 'Unknown Token'
+            };
           }
         } catch (err) {
-          console.warn(`Failed to fetch metadata for ${token.mint}:`, err);
+          console.warn(`[Treasury Tokens] Failed to fetch metadata for ${token.mint}:`, err);
           // Fallback to truncated mint
           tokenMetadata[token.mint] = {
             symbol: token.mint.slice(0, 4) + "..." + token.mint.slice(-4),
@@ -991,12 +1004,16 @@ export class TreasuryController {
 
       await Promise.allSettled(metadataPromises);
 
+      console.log(`[Treasury Tokens] Metadata fetch complete. tokenMetadata map:`, tokenMetadata);
+
       // Build final tokens array with enriched metadata
       for (const token of tokensToEnrich) {
         const metadata = tokenMetadata[token.mint] || {
           symbol: token.mint.slice(0, 4) + "..." + token.mint.slice(-4),
           name: 'Unknown Token'
         };
+
+        console.log(`[Treasury Tokens] Building token ${token.mint}: symbol="${metadata.symbol}"`);
 
         tokens.push({
           mint: token.mint,
@@ -1009,6 +1026,8 @@ export class TreasuryController {
           balanceRaw: (token.available * Math.pow(10, token.decimals)).toString(),
         });
       }
+      
+      console.log(`[Treasury Tokens] Final tokens array:`, tokens);
 
       return res.json({
         success: true,
