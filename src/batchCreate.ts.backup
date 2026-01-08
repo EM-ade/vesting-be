@@ -4,7 +4,6 @@ import { BatchVestingService, BatchRecipient } from './services/batchVestingServ
 import { NFTChecker } from './services/nftChecker';
 import { getConnection, config } from './config';
 import { KeypairManager } from './utils/keypairManager';
-import { getRPCConfig } from './config';
 
 /**
  * Batch vesting creation script
@@ -19,7 +18,7 @@ async function main() {
   console.log('=== Batch Vesting Creation ===\n');
 
   const connection = getConnection();
-  console.log('Connected to:', getRPCConfig().getRPCEndpoint());
+  console.log('Connected to:', config.rpcEndpoint);
 
   // Load admin keypair
   const adminKeypair = KeypairManager.loadFromEnv('ADMIN_PRIVATE_KEY');

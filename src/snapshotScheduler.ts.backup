@@ -11,10 +11,9 @@ import { createClient } from '@supabase/supabase-js';
 import { config } from './config';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { Metaplex } from '@metaplex-foundation/js';
-import { getRPCConfig } from './config';
 
 const supabase = createClient(config.supabaseUrl, config.supabaseServiceRoleKey);
-const connection = new Connection(getRPCConfig().getRPCEndpoint(), 'confirmed');
+const connection = new Connection(config.rpcEndpoint, 'confirmed');
 const metaplex = Metaplex.make(connection);
 
 const CHECK_INTERVAL = 60 * 1000; // Check every 1 minute

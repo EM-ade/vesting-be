@@ -12,7 +12,6 @@ import bs58 from 'bs58';
 import { config, getConnection, getNetwork } from './config';
 import { SupabaseService } from './services/supabaseService';
 import { HeliusNFTService } from './services/heliusNFTService';
-import { getRPCConfig } from './config';
 
 class PoolSyncDaemon {
   private dbService!: SupabaseService;
@@ -42,7 +41,7 @@ class PoolSyncDaemon {
 
     // Initialize connection
     const connection = getConnection();
-    console.log('✅ Connected to Solana:', getRPCConfig().getRPCEndpoint());
+    console.log('✅ Connected to Solana:', config.rpcEndpoint);
 
     // Parse treasury keypair
     try {

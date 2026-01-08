@@ -44,7 +44,8 @@
     "migrate:infisical": "ts-node scripts/migrateToInfisical.ts",
     "test:infisical-integration": "ts-node scripts/testInfisicalIntegration.ts",
     "infisical:health": "ts-node -e \"require('./src/services/infisicalService').healthCheck().then((ok: boolean) => { console.log(ok ? '✅ Healthy' : '❌ Unhealthy'); process.exit(ok ? 0 : 1); })\"",
-    "infisical:list-keys": "ts-node -e \"require('./src/services/infisicalService').listTreasuryKeys().then((keys: string[]) => { console.log('Treasury keys in Infisical:', keys); })\""
+    "infisical:list-keys": "ts-node -e \"require('./src/services/infisicalService').listTreasuryKeys().then((keys: string[]) => { console.log('Treasury keys in Infisical:', keys); })\"",
+    "switch-network": "ts-node scripts/switchNetwork.ts"
   },
   "dependencies": {
     "@chakra-ui/icons": "^2.2.4",
