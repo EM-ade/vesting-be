@@ -6,6 +6,7 @@
 
 import BN from 'bn.js';
 import { config } from '../config';
+import { toSmallestUnits, fromSmallestUnits } from '../utils/roundingUtils';
 
 export interface AllocationInput {
     wallet: string;
@@ -52,7 +53,8 @@ export class AllocationCalculator {
         const minPayout = minPayoutSmallestUnits ?? config.minPayoutLamports;
         
         // Convert total pool amount to smallest units (integer math)
-        const totalPoolSmallestUnits = new BN(Math.floor(totalPoolAmount * Math.pow(10, tokenDecimals)));
+        // Use consistent rounding utility
+        const totalPoolSmallestUnits = toSmallestUnits(totalPoolAmount, tokenDecimals);
         
         // Calculate total weight for weighted distribution
         const totalWeight = allocations.reduce((sum, alloc) => {
@@ -75,13 +77,14 @@ export class AllocationCalculator {
             if (alloc.type === 'percentage') {
                 percentage = alloc.value;
                 // Use integer math: (totalPool * percentage) / 100
+                // Round percentage to avoid precision issues
+                const percentageBN = new BN(Math.floor(alloc.value * 1000)); // Multiply by 1000 for 3 decimal precision
                 tokenAmountSmallestUnits = totalPoolSmallestUnits
-                    .mul(new BN(Math.floor(alloc.value * 1000))) // Multiply by 1000 for precision
+                    .mul(percentageBN)
                     .div(new BN(100000)); // Divide by 100,000 (100 * 1000)
             } else {
-                // Fixed allocation
-                const fixedAmountSmallestUnits = new BN(Math.floor(alloc.value * Math.pow(10, tokenDecimals)));
-                tokenAmountSmallestUnits = fixedAmountSmallestUnits;
+                // Fixed allocation - use consistent rounding
+                tokenAmountSmallestUnits = toSmallestUnits(alloc.value, tokenDecimals);
                 percentage = (alloc.value / totalPoolAmount) * 100;
             }
 
@@ -103,7 +106,7 @@ export class AllocationCalculator {
             remainingPool = remainingPool.sub(finalAmountSmallestUnits);
 
             // Convert back to human-readable units for display
-            const tokenAmount = finalAmountSmallestUnits.toNumber() / Math.pow(10, tokenDecimals);
+            const tokenAmount = fromSmallestUnits(finalAmountSmallestUnits, tokenDecimals);
 
             return {
                 wallet: alloc.wallet,
@@ -118,7 +121,7 @@ export class AllocationCalculator {
         });
 
         const totalAllocated = calculatedAllocations.reduce((sum, alloc) => sum + alloc.tokenAmount, 0);
-        const unallocatedRemainderHuman = unallocatedRemainder.toNumber() / Math.pow(10, tokenDecimals);
+        const unallocatedRemainderHuman = fromSmallestUnits(unallocatedRemainder, tokenDecimals);
 
         return {
             allocations: calculatedAllocations,

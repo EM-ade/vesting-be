@@ -21,7 +21,7 @@ export const config = {
   // DEPRECATED: Use getRPCConfig().getRPCEndpoint() instead
   // Kept for backward compatibility during migration
   get rpcEndpoint(): string {
-    console.warn('[DEPRECATED] getRPCConfig().getRPCEndpoint() is deprecated. Use getRPCConfig().getRPCEndpoint() instead.');
+    console.warn('[DEPRECATED] config.rpcEndpoint is deprecated. Use getRPCConfig().getRPCEndpoint() instead.');
     return getRPCConfig().getRPCEndpoint();
   },
   treasuryPrivateKey: process.env.TREASURY_PRIVATE_KEY || "",

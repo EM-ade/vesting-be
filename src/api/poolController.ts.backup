@@ -16,7 +16,6 @@ import {
   formatTokenAmount 
 } from '../utils/roundingUtils';
 import { simulateStreamflowPoolCreation, validatePoolParameters } from '../utils/transactionSimulation';
-import { getRPCConfig } from '../config';
 
 interface ValidationResult {
   valid: boolean;
@@ -44,7 +43,7 @@ export class PoolController {
   constructor() {
     const supabaseClient = getSupabaseClient();
     this.dbService = new SupabaseService(supabaseClient);
-    this.connection = new Connection(getRPCConfig().getRPCEndpoint(), 'confirmed');
+    this.connection = new Connection(config.rpcEndpoint, 'confirmed');
     this.streamflowService = new StreamflowService();
   }
 
@@ -199,22 +198,20 @@ export class PoolController {
 
           console.log(`[VALIDATION] Native SOL balance (fresh with 'confirmed' commitment): ${solBalanceInSOL} SOL`);
 
-          // For native SOL pools, align with streamflowService.ts calculation:
-          // Required = (pool * 1.005) + 0.02
-          // This matches streamflowService.ts line 77
-          const poolWithStreamflowFee = calculateRequiredWithFee(params.total_pool_amount); // pool * 1.005
-          const wrapAndRentFees = 0.02; // Must match streamflowService.ts
-          const requiredSOL = poolWithStreamflowFee + wrapAndRentFees;
+          // For native SOL pools, we need:
+          // 1. Pool amount + 0.5% buffer (will be locked in Streamflow)
+          // 2. 0.013 SOL extra (stays in vault for Streamflow rent/fees)
+          const requiredSOL = calculateRequiredWithFee(params.total_pool_amount) + 0.013;
 
           result.checks.tokenBalance.required = requiredSOL;
 
           if (floatLessThan(solBalanceInSOL, requiredSOL, EPSILON)) {
             result.checks.tokenBalance.valid = false;
-            result.checks.tokenBalance.message = `Insufficient SOL in treasury. Required: ${formatTokenAmount(requiredSOL, 4)} SOL (${params.total_pool_amount} pool + 0.5% Streamflow fee + 0.02 wrap/rent fees), Available: ${formatTokenAmount(solBalanceInSOL, 4)} SOL. The UI will prompt you to fund the treasury.`;
+            result.checks.tokenBalance.message = `Insufficient SOL in treasury. Required: ${formatTokenAmount(requiredSOL, 4)} SOL (${params.total_pool_amount} pool + 0.5% buffer + 0.013 for Streamflow deployment), Available: ${formatTokenAmount(solBalanceInSOL, 4)} SOL. The UI will prompt you to fund the treasury.`;
             result.warnings.push(result.checks.tokenBalance.message);
             // DON'T set result.valid = false - this is a warning, not an error
           } else {
-            result.checks.tokenBalance.message = `Native SOL balance sufficient: ${formatTokenAmount(solBalanceInSOL, 4)} SOL (need ${formatTokenAmount(requiredSOL, 4)} SOL)`;
+            result.checks.tokenBalance.message = `Native SOL balance sufficient: ${formatTokenAmount(solBalanceInSOL, 4)} SOL`;
           }
         } else {
           // SPL Token - check token account
@@ -684,21 +681,13 @@ export class PoolController {
           
           if (isNativeSOL) {
             // For native SOL, check SOL balance
-            // MUST match streamflowService.ts and validation calculation
             const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
             const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
+            // Required: Pool amount + wrapping tx + Streamflow fees + rent + buffer
+            const requiredSOL = total_pool_amount + 0.025; // Pool + 0.025 SOL for all fees
             
-            // Use EXACT same calculation as streamflowService.ts (line 77) and validation (line 204)
-            const poolWithStreamflowFee = total_pool_amount * 1.005; // 0.5% Streamflow fee
-            const wrapAndRentFees = 0.02; // Wrapping tx + account rent + buffer
-            const requiredSOL = poolWithStreamflowFee + wrapAndRentFees;
-            
-            console.log(`[STREAMFLOW] Native SOL pool - Treasury balance check:`);
-            console.log(`[STREAMFLOW]   Pool amount: ${total_pool_amount} SOL`);
-            console.log(`[STREAMFLOW]   Pool + Streamflow fee (0.5%): ${poolWithStreamflowFee.toFixed(4)} SOL`);
-            console.log(`[STREAMFLOW]   Wrap/rent fees: ${wrapAndRentFees.toFixed(4)} SOL`);
-            console.log(`[STREAMFLOW]   Total required: ${requiredSOL.toFixed(4)} SOL`);
-            console.log(`[STREAMFLOW]   Treasury balance: ${solBalanceInSOL.toFixed(4)} SOL`);
+            console.log(`[STREAMFLOW] Native SOL pool - Treasury balance: ${solBalanceInSOL.toFixed(4)} SOL`);
+            console.log(`[STREAMFLOW] Required: ${requiredSOL.toFixed(4)} SOL (${total_pool_amount} pool + 0.025 fees/rent)`);
             
             if (solBalanceInSOL < requiredSOL) {
               throw new Error(`Treasury has insufficient SOL. Required: ${requiredSOL.toFixed(4)} SOL, Available: ${solBalanceInSOL.toFixed(4)} SOL. Please fund the treasury before deploying.`);
@@ -771,32 +760,14 @@ export class PoolController {
           }
           console.log('[STREAMFLOW] ✅ Parameters validated');
 
-          // Calculate effective timestamps BEFORE simulation
-          const originalDuration = endTimestamp - startTimestamp;
-          const simStartTime = startTimestamp < nowTimestamp ? nowTimestamp + 60 : startTimestamp;
-          const simEndTime = startTimestamp < nowTimestamp ? simStartTime + originalDuration : endTimestamp;
-          
-          console.log('[STREAMFLOW] Timestamp calculation:');
-          console.log(`[STREAMFLOW]   Original: start=${startTimestamp}, end=${endTimestamp}, duration=${originalDuration}s`);
-          console.log(`[STREAMFLOW]   Effective: start=${simStartTime}, end=${simEndTime}`);
-          console.log(`[STREAMFLOW]   Now: ${nowTimestamp}`);
-          
-          // Validate timestamps BEFORE simulation
-          if (simEndTime <= simStartTime) {
-            throw new Error(
-              `Invalid timestamps: end time (${simEndTime}) must be after start time (${simStartTime}). ` +
-              `Duration was ${originalDuration}s. Please set a future start time or longer duration.`
-            );
-          }
-
           // PRE-FLIGHT SIMULATION: Simulate the transaction before execution
           console.log('[STREAMFLOW] Running pre-flight simulation...');
           const simulation = await simulateStreamflowPoolCreation(this.connection, {
             treasuryKeypair: adminKeypair,
             tokenMint: tokenMint,
             totalAmount: poolData.total_pool_amount,
-            startTime: simStartTime,
-            endTime: simEndTime,
+            startTime: startTimestamp < nowTimestamp ? nowTimestamp + 60 : startTimestamp,
+            endTime: endTimestamp,
           });
 
           if (!simulation.success) {
@@ -814,31 +785,13 @@ export class PoolController {
             tokens: `${formatTokenAmount(simulation.balances.tokens, 4)} tokens`,
           });
 
-          // Calculate effective timestamps (handle past start times)
-          let effectiveStart = startTimestamp;
-          let effectiveEnd = endTimestamp;
-          const duration = endTimestamp - startTimestamp;
-          
-          if (startTimestamp < nowTimestamp) {
-            console.warn(`[STREAMFLOW] Start time ${startTimestamp} is in the past (now: ${nowTimestamp}). Adjusting...`);
-            effectiveStart = nowTimestamp + 60;
-            effectiveEnd = effectiveStart + duration;
-            console.log(`[STREAMFLOW] Adjusted: start=${effectiveStart}, end=${effectiveEnd}, duration=${duration}s`);
-          }
-
-          // CRITICAL: Validate that end time is AFTER start time
-          if (effectiveEnd <= effectiveStart) {
-            throw new Error(
-              `Invalid pool duration: End time (${effectiveEnd}) must be after start time (${effectiveStart}). ` +
-              `Original: start=${startTimestamp}, end=${endTimestamp}, duration=${duration}s. ` +
-              `Please increase the vesting duration.`
-            );
-          }
-
           // Validate timestamps for Streamflow
           if (startTimestamp < nowTimestamp) {
-            const adjustedStart = effectiveStart;
-            const adjustedEnd = effectiveEnd;
+            console.warn(`Start time ${startTimestamp} is in the past (now: ${nowTimestamp}). Adjusting to current time + 60 seconds.`);
+            // Adjust start time to be 60 seconds in the future
+            const adjustedStart = nowTimestamp + 60;
+            const duration = endTimestamp - startTimestamp;
+            const adjustedEnd = adjustedStart + duration;
             // Adjust cliff time if it was set
             if (cliffTimestamp) {
               cliffTimestamp = adjustedStart + Math.floor(poolData.cliff_duration_days * 86400);

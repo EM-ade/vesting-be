@@ -6,6 +6,7 @@ import { SupabaseService } from "../services/supabaseService";
 import { config } from "../config";
 import { getSupabaseClient } from "../lib/supabaseClient";
 import { getVaultKeypairForProject } from "../services/vaultService";
+import { getRPCConfig } from '../config';
 
 /**
  * Treasury Management API Controller
@@ -18,7 +19,7 @@ export class TreasuryController {
   constructor() {
     const supabaseClient = getSupabaseClient();
     this.dbService = new SupabaseService(supabaseClient);
-    this.connection = new Connection(config.rpcEndpoint, "confirmed");
+    this.connection = new Connection(getRPCConfig().getRPCEndpoint(), "confirmed");
   }
 
   /**
@@ -856,7 +857,7 @@ export class TreasuryController {
       const treasuryKeypair = await getVaultKeypairForProject(projectId);
       const treasuryPublicKey = treasuryKeypair.publicKey;
 
-      const connection = new Connection(config.rpcEndpoint, "confirmed");
+      const connection = new Connection(getRPCConfig().getRPCEndpoint(), "confirmed");
 
       // Get locked amounts per token from active pools
       const { data: activePools, error: poolError } = await this.dbService.supabase
@@ -931,7 +932,7 @@ export class TreasuryController {
       }
 
       // Fetch metadata for unknown tokens using Helius DAS API
-      const heliusUrl = 'https://mainnet.helius-rpc.com/?api-key=a53cd9fb-465b-4ee6-a217-c33cdd15707d';
+      const heliusUrl = getRPCConfig().getRPCEndpoint();
       const tokenMetadata: Record<string, { symbol: string; name: string }> = {};
 
       // Known tokens mapping

@@ -13,7 +13,6 @@ import { VestingReclaimService } from './services/vestingReclaimService';
 import { SupabaseService } from './services/supabaseService';
 import { NFTChecker } from './services/nftChecker';
 import { ICluster, GenericStreamClient, IChain } from '@streamflow/stream';
-import { getRPCConfig } from './config';
 
 async function main() {
   console.log('💰 Reclaiming expired vestings...\n');
@@ -28,7 +27,7 @@ async function main() {
 
   // Initialize connection
   const connection = getConnection();
-  console.log('✅ Connected to Solana:', getRPCConfig().getRPCEndpoint());
+  console.log('✅ Connected to Solana:', config.rpcEndpoint);
 
   // Parse admin keypair
   let adminKeypair: Keypair;

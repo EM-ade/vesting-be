@@ -4,7 +4,6 @@ import { createClient } from "@supabase/supabase-js";
 import NodeCache from "node-cache";
 import { SupabaseService } from "../services/supabaseService";
 import { config } from "../config";
-import { getRPCConfig } from '../config';
 
 /**
  * Metrics API Controller
@@ -21,7 +20,7 @@ export class MetricsController {
       config.supabaseServiceRoleKey
     );
     this.dbService = new SupabaseService(supabaseClient);
-    this.connection = new Connection(getRPCConfig().getRPCEndpoint(), "confirmed");
+    this.connection = new Connection(config.rpcEndpoint, "confirmed");
     this.cache = new NodeCache({ stdTTL: 300 }); // Cache for 5 minutes by default
   }
 
