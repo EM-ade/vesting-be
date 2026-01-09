@@ -3,6 +3,7 @@ dist/
 .env
 .env.prod
 .env.test
+.env.local
 *.log
 coverage/
 tests/test-wallet.json
