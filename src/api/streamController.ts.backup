@@ -3,7 +3,6 @@ import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { createClient } from '@supabase/supabase-js';
 import { SupabaseService } from '../services/supabaseService';
 import { config } from '../config';
-import { getRPCConfig } from '../config';
 
 /**
  * Database stream record type
@@ -30,7 +29,7 @@ export class StreamController {
   constructor() {
     const supabaseClient = createClient(config.supabaseUrl, config.supabaseServiceRoleKey);
     this.dbService = new SupabaseService(supabaseClient);
-    this.connection = new Connection(getRPCConfig().getRPCEndpoint(), 'confirmed');
+    this.connection = new Connection(config.rpcEndpoint, 'confirmed');
   }
 
   /**

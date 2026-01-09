@@ -1,18 +1,53 @@
 import { PublicKey } from '@solana/web3.js';
+import { getRPCConfig, type SolanaCluster } from '../config/rpcConfig';
 
 /**
  * Helius NFT Service
  * Uses Helius DAS API to detect NFT holders and count NFTs
+ * 
+ * Now uses centralized RPC configuration for consistent network management
  */
 export class HeliusNFTService {
   private apiKey: string;
   private baseUrl: string;
+  private network: SolanaCluster;
 
-  constructor(apiKey: string, network: 'devnet' | 'mainnet-beta' = 'devnet') {
-    this.apiKey = apiKey;
+  /**
+   * Create Helius NFT Service
+   * @param apiKey - Helius API key (optional if using centralized config)
+   * @param network - Network cluster (optional, uses active network from RPC config if not provided)
+   */
+  constructor(apiKey?: string, network?: SolanaCluster) {
+    // Use API key from parameter or centralized config
+    const rpcConfig = getRPCConfig();
+    this.apiKey = apiKey || rpcConfig.getConfiguration().networks['helius-mainnet']?.rpcEndpoint.split('api-key=')[1] || '';
+    
+    // Use network from parameter or active network from RPC config
+    this.network = network || rpcConfig.getCluster();
+    
     // Use correct Helius RPC endpoints - ensure no double slash or query params
+    const domain = this.network === 'mainnet-beta' ? 'mainnet.helius-rpc.com' : 'devnet.helius-rpc.com';
+    this.baseUrl = `https://${domain}`;
+    
+    console.log(`[Helius NFT Service] Initialized for ${this.network} using ${this.baseUrl}`);
+  }
+  
+  /**
+   * Get the current network being used
+   */
+  public getNetwork(): SolanaCluster {
+    return this.network;
+  }
+  
+  /**
+   * Switch to a different network
+   * @param network - The network to switch to
+   */
+  public switchNetwork(network: SolanaCluster): void {
+    this.network = network;
     const domain = network === 'mainnet-beta' ? 'mainnet.helius-rpc.com' : 'devnet.helius-rpc.com';
     this.baseUrl = `https://${domain}`;
+    console.log(`[Helius NFT Service] Switched to ${network} using ${this.baseUrl}`);
   }
 
   /**

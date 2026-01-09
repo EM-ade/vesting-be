@@ -25,7 +25,6 @@ import { config } from "../config";
 import { cache } from "../lib/cache";
 import Decimal from "decimal.js";
 import { EligibilityService } from "../services/eligibilityService";
-import { getRPCConfig } from '../config';
 
 /**
  * User Vesting API Controller
@@ -48,20 +47,20 @@ export class UserVestingController {
     // Detect cluster more robustly
     let cluster: "devnet" | "mainnet-beta" = "mainnet-beta";
     if (
-      getRPCConfig().getRPCEndpoint().includes("devnet") ||
-      getRPCConfig().getRPCEndpoint().includes("solana-devnet")
+      config.rpcEndpoint.includes("devnet") ||
+      config.rpcEndpoint.includes("solana-devnet")
     ) {
       cluster = "devnet";
     }
 
     // Use Helius RPC if API key is provided and we are on devnet (for better stability)
-    let rpcUrl = getRPCConfig().getRPCEndpoint();
+    let rpcUrl = config.rpcEndpoint;
     if (
       cluster === "devnet" &&
       config.heliusApiKey &&
-      !getRPCConfig().getRPCEndpoint().includes("helius")
+      !config.rpcEndpoint.includes("helius")
     ) {
-      rpcUrl = getRPCConfig().getRPCEndpoint();
+      rpcUrl = `https://devnet.helius-rpc.com/?api-key=${config.heliusApiKey}`;
       console.log(
         `[INIT] Switching to Helius Devnet RPC for stability: ${
           rpcUrl.split("?")[0]
@@ -1126,7 +1125,7 @@ export class UserVestingController {
         try {
           console.log(
             `[CLAIM] Fetching blockhash from RPC: ${
-              getRPCConfig().getRPCEndpoint()
+              config.rpcEndpoint
             } (Commitment: ${commitment}, Attempt: ${4 - retries})`
           );
           blockhashRes = await this.connection.getLatestBlockhash(commitment);
@@ -1134,12 +1133,12 @@ export class UserVestingController {
         } catch (err) {
           retries--;
           console.warn(
-            `[CLAIM] Failed to get blockhash from ${getRPCConfig().getRPCEndpoint()} with commitment ${commitment}. Retries left: ${retries}`,
+            `[CLAIM] Failed to get blockhash from ${config.rpcEndpoint} with commitment ${commitment}. Retries left: ${retries}`,
             err
           );
           if (retries === 0) {
             console.error(
-              `[CLAIM] Fatal: All 3 blockhash fetch attempts failed for endpoint: ${getRPCConfig().getRPCEndpoint()}`
+              `[CLAIM] Fatal: All 3 blockhash fetch attempts failed for endpoint: ${config.rpcEndpoint}`
             );
             throw err;
           }

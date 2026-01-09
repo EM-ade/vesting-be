@@ -2,7 +2,6 @@ import { Connection, PublicKey, Keypair, Transaction } from '@solana/web3.js';
 import { BN } from '@coral-xyz/anchor';
 import { GenericStreamClient, ICluster, IChain, getBN, getNumberFromBN } from '@streamflow/stream';
 import { config } from '../config';
-import { getRPCConfig } from '../config';
 
 /**
  * Streamflow Integration Service
@@ -13,10 +12,10 @@ export class StreamflowService {
   private connection: Connection;
 
   constructor() {
-    this.connection = new Connection(getRPCConfig().getRPCEndpoint(), 'confirmed');
+    this.connection = new Connection(config.rpcEndpoint, 'confirmed');
     this.client = new GenericStreamClient<IChain.Solana>({
       chain: IChain.Solana,
-      clusterUrl: getRPCConfig().getRPCEndpoint(),
+      clusterUrl: config.rpcEndpoint,
       cluster: ICluster.Mainnet,
       commitment: 'confirmed',
     });
@@ -71,24 +70,16 @@ export class StreamflowService {
         // For Native SOL: Check main wallet balance, not wSOL ATA
         const solBalance = await this.connection.getBalance(adminKeypair.publicKey);
         const solBalanceSOL = solBalance / 1e9;
-        
-        // Required: Pool amount + 0.5% Streamflow fee + wrapping/rent fees
-        // Note: totalAmount is the RAW pool amount (not yet including Streamflow fee)
-        const poolWithStreamflowFee = totalAmount * 1.005; // Add 0.5% for Streamflow
-        const wrapAndRentFees = 0.02; // Wrapping tx + account rent + buffer
-        const requiredSOL = poolWithStreamflowFee + wrapAndRentFees;
+        // Required: Pool amount + wrapping tx fee + Streamflow account rent + buffer
+        const requiredSOL = totalAmount + 0.02; // Pool amount + 0.02 SOL for all fees
         
         console.log(`[STREAMFLOW] Native SOL balance: ${solBalanceSOL.toFixed(4)} SOL`);
-        console.log(`[STREAMFLOW] Pool amount: ${totalAmount} SOL`);
-        console.log(`[STREAMFLOW] Pool + Streamflow fee (0.5%): ${poolWithStreamflowFee.toFixed(4)} SOL`);
-        console.log(`[STREAMFLOW] Wrap/rent fees: ${wrapAndRentFees.toFixed(4)} SOL`);
-        console.log(`[STREAMFLOW] Total required: ${requiredSOL.toFixed(4)} SOL`);
+        console.log(`[STREAMFLOW] Required: ${requiredSOL.toFixed(4)} SOL (${totalAmount} pool + 0.02 fees/rent)`);
         
         if (solBalanceSOL < requiredSOL) {
           throw new Error(
-            `Treasury has insufficient SOL. Required: ${requiredSOL.toFixed(4)} SOL, ` +
-            `Available: ${solBalanceSOL.toFixed(4)} SOL. ` +
-            `Please fund the treasury before deploying.`
+            `Insufficient SOL. Required: ${requiredSOL.toFixed(4)} SOL (${totalAmount} for pool + 0.02 for fees/rent), ` +
+            `Available: ${solBalanceSOL.toFixed(4)} SOL`
           );
         }
 
