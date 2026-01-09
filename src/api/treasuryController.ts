@@ -1037,8 +1037,28 @@ export class TreasuryController {
       });
     } catch (err: any) {
       console.error("Error fetching treasury tokens:", err);
+      
+      // Provide more specific error messages for common issues
+      let errorMessage = "Failed to fetch treasury tokens";
+      let errorCode = "TREASURY_ERROR";
+      
+      if (err.message?.includes('Failed to retrieve treasury key') || 
+          err.message?.includes('Token missing') ||
+          err.message?.includes('Infisical')) {
+        errorMessage = "Failed to retrieve treasury key. Please check Infisical configuration.";
+        errorCode = "INFISICAL_AUTH_ERROR";
+        console.error("[TREASURY] Infisical authentication error - check INFISICAL_CLIENT_ID, INFISICAL_CLIENT_SECRET, and INFISICAL_PROJECT_ID environment variables");
+      } else if (err.message?.includes('Vault not found')) {
+        errorMessage = "Project vault not configured. Please set up the project vault first.";
+        errorCode = "VAULT_NOT_FOUND";
+      } else if (err.message?.includes('Public key mismatch')) {
+        errorMessage = "Vault key mismatch detected. Please contact support.";
+        errorCode = "VAULT_KEY_MISMATCH";
+      }
+      
       return res.status(500).json({
-        error: "Failed to fetch treasury tokens",
+        error: errorMessage,
+        errorCode,
         details: err.message,
       });
     }
