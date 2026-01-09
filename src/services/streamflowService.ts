@@ -211,9 +211,9 @@ export class StreamflowService {
         const solBalanceSOL = solBalance / 1e9;
         console.log(`[STREAMFLOW] SOL balance for rent: ${solBalanceSOL.toFixed(4)} SOL`);
         
-        if (solBalanceSOL < 0.015) {
+        if (solBalanceSOL < 0.15) {
           throw new Error(
-            `Insufficient SOL for Streamflow rent. Required: ~0.015 SOL, Available: ${solBalanceSOL.toFixed(4)} SOL`
+            `Insufficient SOL for Streamflow deployment. Required: ~0.15 SOL (0.117 service fee + 0.015 network fees), Available: ${solBalanceSOL.toFixed(4)} SOL. See: https://docs.streamflow.finance/streamflow/fees`
           );
         }
       }

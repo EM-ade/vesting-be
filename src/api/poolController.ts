@@ -73,7 +73,7 @@ export class PoolController {
       warnings: [],
       checks: {
         timestamp: { valid: true, message: '' },
-        solBalance: { valid: true, current: 0, required: 0.015, message: '' }, // ~0.01266 SOL + buffer
+        solBalance: { valid: true, current: 0, required: 0.15, message: '' }, // Streamflow requires ~0.117 SOL service fee + ~0.015 SOL network fees
         tokenBalance: { valid: true, current: 0, required: calculateRequiredWithFee(params.total_pool_amount), message: '' },
         treasury: { valid: true, address: '' },
         allocations: { valid: true, total: 0, message: '' },
@@ -158,9 +158,10 @@ export class PoolController {
       result.checks.solBalance.current = solBalanceInSOL;
       console.log(`[VALIDATION] Treasury SOL balance: ${solBalanceInSOL} SOL (fresh fetch with 'confirmed' commitment)`);
 
-      // UPDATED: Base Streamflow requirement is ~0.013 SOL
-      // Token account rent (~0.002 SOL) will be handled by the transaction if needed
-      const BASE_SOL_REQUIREMENT = 0.013; // Streamflow deployment cost
+      // UPDATED: Streamflow requires ~0.117 SOL service fee + ~0.015 SOL network fees
+      // Total minimum: ~0.13 SOL, using 0.15 SOL for safety buffer
+      // See: https://docs.streamflow.finance/streamflow/fees
+      const BASE_SOL_REQUIREMENT = 0.15; // Streamflow service fee + network fees
 
       if (solBalanceInSOL < BASE_SOL_REQUIREMENT) {
         result.checks.solBalance.valid = false;
@@ -767,8 +768,8 @@ export class PoolController {
             
             console.log(`[STREAMFLOW] Treasury SOL balance: ${solBalanceInSOL.toFixed(4)} SOL`);
             
-            if (solBalanceInSOL < 0.015) {
-              throw new Error(`Treasury has insufficient SOL for deployment fees. Required: 0.015 SOL, Available: ${solBalanceInSOL.toFixed(4)} SOL. Please fund the treasury before deploying.`);
+            if (solBalanceInSOL < 0.15) {
+              throw new Error(`Treasury has insufficient SOL for Streamflow deployment. Required: ~0.15 SOL (0.117 service fee + 0.015 network fees), Available: ${solBalanceInSOL.toFixed(4)} SOL. Please fund the treasury before deploying.`);
             }
             console.log('[STREAMFLOW] ✅ Treasury has sufficient SOL for deployment fees');
           }
