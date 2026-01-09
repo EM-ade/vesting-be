@@ -667,16 +667,44 @@ export class PoolController {
             // This fixes "TokenAccountNotFoundError" by creating it if it doesn't exist
             try {
               console.log(`[POOL] Ensuring ATA exists for admin ${adminKeypair.publicKey.toBase58()} and mint ${tokenMint.toBase58()}...`);
-              const adminAta = await getOrCreateAssociatedTokenAccount(
-                this.connection,
-                adminKeypair, // Payer
-                tokenMint,
-                adminKeypair.publicKey // Owner
-              );
-              console.log(`[POOL] Admin ATA ready: ${adminAta.address.toBase58()}`);
-            } catch (ataError) {
-              console.error('[POOL] Failed to ensure admin ATA exists:', ataError);
-              // We continue, as it might already exist or Streamflow might handle it
+              
+              // First check if ATA already exists
+              const { getAssociatedTokenAddress, getAccount, createAssociatedTokenAccountInstruction, TOKEN_PROGRAM_ID } = await import('@solana/spl-token');
+              const { Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
+              
+              const ataAddress = await getAssociatedTokenAddress(tokenMint, adminKeypair.publicKey);
+              
+              try {
+                // Try to get the account - if it exists, we're good
+                const existingAta = await getAccount(this.connection, ataAddress);
+                console.log(`[POOL] Admin ATA already exists: ${existingAta.address.toBase58()}`);
+              } catch (ataCheckError) {
+                // ATA doesn't exist - this is expected if user funded from wallet
+                // The tokens should be in the vault, not in admin's ATA
+                console.log(`[POOL] Admin ATA does not exist yet - this is expected when funding from wallet`);
+                console.log(`[POOL] Tokens should be in the treasury vault's ATA, not admin's ATA`);
+                
+                // Check if treasury vault has the tokens instead
+                const vaultKeypair = adminKeypair; // In this context, adminKeypair IS the vault
+                const vaultAta = await getAssociatedTokenAddress(tokenMint, vaultKeypair.publicKey);
+                
+                try {
+                  const vaultAtaInfo = await getAccount(this.connection, vaultAta);
+                  const vaultBalance = Number(vaultAtaInfo.amount) / 1e9;
+                  console.log(`[POOL] ✅ Treasury vault ATA exists with balance: ${vaultBalance}`);
+                } catch (vaultAtaError) {
+                  console.error(`[POOL] ❌ Treasury vault ATA does not exist or has no balance`);
+                  throw new Error(`Treasury vault token account not found. Please ensure you funded the vault in Step 4 before deploying.`);
+                }
+              }
+            } catch (ataError: any) {
+              console.error('[POOL] Failed to verify token accounts:', ataError);
+              // If it's our custom error message, re-throw it
+              if (ataError.message?.includes('Treasury vault token account not found')) {
+                throw ataError;
+              }
+              // Otherwise log and continue - Streamflow might handle it
+              console.warn('[POOL] Continuing despite ATA check error - Streamflow may handle it');
             }
           } else {
             console.log('[POOL] Native SOL detected - skipping SPL token ATA creation (wSOL wrapping will handle it)');
