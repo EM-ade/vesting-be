@@ -50,6 +50,10 @@ router.post(
 );
 
 // Pool routes (SECURITY: Admin-protected write operations, read operations are public)
+router.get(
+  "/pools/get-creation-fee",
+  poolController.getCreationFee.bind(poolController)
+); // Public read - frontend needs this before admin auth
 router.post(
   "/pools",
   requireAdmin,

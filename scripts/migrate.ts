@@ -21,7 +21,11 @@ const MIGRATION_ORDER = [
   '01_fix_vesting_mode.sql',
   '02_backfill_project_id.sql',
   '03_enhance_pool_schema.sql',
-  '05_change_amount_to_numeric.sql'
+  '05_change_amount_to_numeric.sql',
+  '06_add_pool_claim_fee.sql',
+  '07_add_infisical_support.sql',
+  '08_performance_indexes.sql',
+  '09_add_custom_pool_fee.sql'
 ];
 
 const migrate = async () => {

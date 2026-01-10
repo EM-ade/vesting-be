@@ -18,7 +18,8 @@ import {
 import { createClient } from "@supabase/supabase-js";
 import bs58 from "bs58";
 import { SupabaseService } from "../services/supabaseService";
-import { StreamflowService } from "../services/streamflowService";
+// DISABLED: Streamflow integration - using database-only mode for cost savings
+// import { StreamflowService } from "../services/streamflowService";
 import { PriceService } from "../services/priceService";
 import { getVaultKeypairForProject } from "../services/vaultService";
 import { config } from "../config";
@@ -34,7 +35,9 @@ import { getRPCConfig } from '../config';
 export class UserVestingController {
   private dbService: SupabaseService;
   private connection: Connection;
-  private streamflowService: StreamflowService;
+  // DISABLED: Streamflow integration - using database-only mode
+  // The streamflowService property is kept as 'any' to satisfy TypeScript for dead code paths
+  private streamflowService: any = null;
   private priceService: PriceService;
   private eligibilityService: EligibilityService;
   private lastBlockhash: { hash: string; timestamp: number } | null = null;
@@ -70,7 +73,8 @@ export class UserVestingController {
     }
 
     this.connection = new Connection(rpcUrl, "confirmed");
-    this.streamflowService = new StreamflowService();
+    // DISABLED: Streamflow integration - using database-only mode
+    // this.streamflowService = new StreamflowService();
     this.priceService = new PriceService(this.connection, cluster);
     this.eligibilityService = new EligibilityService();
   }
@@ -364,12 +368,16 @@ export class UserVestingController {
       let vestedAmount = 0;
       let vestedPercentage = 0;
 
-      // If pool is deployed to Streamflow, get on-chain vested amount
-      if (stream.streamflow_stream_id) {
+      // DISABLED: Streamflow integration - using database-only mode for cost savings
+      // Always use DB-based vesting calculation (time-based linear vesting)
+      // This saves ~0.117 SOL per pool creation while maintaining same vesting logic
+      if (false && stream.streamflow_stream_id) {
+        // NOTE: Streamflow code preserved but disabled
         try {
-          const streamflowVested = await this.streamflowService.getVestedAmount(
-            stream.streamflow_stream_id
-          );
+          // const streamflowVested = await this.streamflowService.getVestedAmount(
+          //   stream.streamflow_stream_id
+          // );
+          const streamflowVested = 0; // Placeholder - not used
           const poolTotal = stream.total_pool_amount;
           vestedPercentage = streamflowVested / poolTotal;
           vestedAmount = totalAllocation * vestedPercentage;
@@ -664,32 +672,29 @@ export class UserVestingController {
       const TOKEN_DECIMALS = 9;
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
-      // OPTIMIZATION: Fetch all Streamflow data in parallel
-      const streamflowPromises = validVestings.map(async (vesting: any) => {
-        const stream = vesting.vesting_streams;
-        if (stream.streamflow_stream_id) {
-          const cacheKey = `streamflow:${stream.streamflow_stream_id}`;
-          let streamflowVested = cache.get<number>(cacheKey);
-
-          if (streamflowVested === null) {
-            try {
-              streamflowVested = await this.streamflowService.getVestedAmount(
-                stream.streamflow_stream_id
-              );
-              cache.set(cacheKey, streamflowVested, 30);
-            } catch (err) {
-              streamflowVested = null; // Will fall back to time-based calculation
-            }
-          }
-          return { vestingId: vesting.id, streamflowVested };
-        }
-        return { vestingId: vesting.id, streamflowVested: null };
-      });
-
-      const streamflowResults = await Promise.all(streamflowPromises);
-      const streamflowMap = new Map(
-        streamflowResults.map((r) => [r.vestingId, r.streamflowVested])
-      );
+      // DISABLED: Streamflow integration - using database-only mode for cost savings
+      // All vesting calculations now use time-based DB calculation
+      // const streamflowPromises = validVestings.map(async (vesting: any) => {
+      //   const stream = vesting.vesting_streams;
+      //   if (stream.streamflow_stream_id) {
+      //     const cacheKey = `streamflow:${stream.streamflow_stream_id}`;
+      //     let streamflowVested = cache.get<number>(cacheKey);
+      //     if (streamflowVested === null) {
+      //       try {
+      //         streamflowVested = await this.streamflowService.getVestedAmount(stream.streamflow_stream_id);
+      //         cache.set(cacheKey, streamflowVested, 30);
+      //       } catch (err) {
+      //         streamflowVested = null;
+      //       }
+      //     }
+      //     return { vestingId: vesting.id, streamflowVested };
+      //   }
+      //   return { vestingId: vesting.id, streamflowVested: null };
+      // });
+      // const streamflowResults = await Promise.all(streamflowPromises);
+      
+      // Empty map - all vestings will use time-based calculation
+      const streamflowMap = new Map<string, number | null>();
 
       const poolsWithAvailable = [];
       let totalAvailable = 0;
@@ -1464,41 +1469,15 @@ export class UserVestingController {
           const cliffTime = startTime + cliffDurationSeconds;
 
           // Calculate vested amount (with Streamflow caching)
-          let vestedAmount = 0;
-          if (stream.streamflow_stream_id) {
-            try {
-              // Check cache first (30 second TTL)
-              const cacheKey = `streamflow:${stream.streamflow_stream_id}`;
-              let streamflowVested = cache.get<number>(cacheKey);
-
-              if (streamflowVested === null) {
-                streamflowVested = await this.streamflowService.getVestedAmount(
-                  stream.streamflow_stream_id
-                );
-                cache.set(cacheKey, streamflowVested, 30);
-              }
-
-              const poolTotal = stream.total_pool_amount;
-              const vestedPercentage = streamflowVested / poolTotal;
-              vestedAmount = totalAllocation * vestedPercentage;
-            } catch (err) {
-              const vestedPercentage = this.calculateVestedPercentage(
-                now,
-                startTime,
-                endTime,
-                cliffTime
-              );
-              vestedAmount = totalAllocation * vestedPercentage;
-            }
-          } else {
-            const vestedPercentage = this.calculateVestedPercentage(
-              now,
-              startTime,
-              endTime,
-              cliffTime
-            );
-            vestedAmount = totalAllocation * vestedPercentage;
-          }
+          // DISABLED: Streamflow integration - using database-only mode for cost savings
+          // Always use time-based vesting calculation from DB
+          const vestedPercentage = this.calculateVestedPercentage(
+            now,
+            startTime,
+            endTime,
+            cliffTime
+          );
+          const vestedAmount = totalAllocation * vestedPercentage;
 
           // Get claims for this specific vesting
           const vestingClaims = claimHistory.filter(
@@ -1739,9 +1718,9 @@ export class UserVestingController {
             let streamflowVested = cache.get<number>(cacheKey);
 
             if (streamflowVested === null) {
-              streamflowVested = await this.streamflowService.getVestedAmount(
-                stream.streamflow_stream_id
-              );
+              // DISABLED: streamflowVested = await this.streamflowService.getVestedAmount(
+                // stream.streamflow_stream_id // DISABLED
+              streamflowVested = 0; // Fallback - using DB calculation instead of Streamflow
               cache.set(cacheKey, streamflowVested, 30);
             }
 
@@ -2372,9 +2351,9 @@ export class UserVestingController {
             let streamflowVested = cache.get<number>(cacheKey);
 
             if (streamflowVested === null) {
-              streamflowVested = await this.streamflowService.getVestedAmount(
-                stream.streamflow_stream_id
-              );
+              // DISABLED: streamflowVested = await this.streamflowService.getVestedAmount(
+                // stream.streamflow_stream_id // DISABLED
+              streamflowVested = 0; // Fallback - using DB calculation instead of Streamflow
               cache.set(cacheKey, streamflowVested, 30);
             }
 
