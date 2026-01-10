@@ -19,10 +19,12 @@ import BN from 'bn.js';
 export const EPSILON = 0.000001; // 1 millionth of a token
 
 /**
- * Streamflow fee buffer (0.5% = 0.005)
- * Streamflow charges ~0.5% fee on pool creation
+ * Fee multiplier for pool creation
+ * DISABLED: Streamflow fee removed - using database-only mode
+ * Previously: 1.005 (0.5% Streamflow fee)
+ * Now: 1.0 (no fee in database-only mode)
  */
-export const STREAMFLOW_FEE_MULTIPLIER = 1.005;
+export const STREAMFLOW_FEE_MULTIPLIER = 1.0;
 
 /**
  * Round a token amount DOWN to avoid over-allocation
@@ -115,16 +117,17 @@ export function floatLessThan(a: number, b: number, epsilon: number = EPSILON): 
 }
 
 /**
- * Calculate required tokens with Streamflow fee buffer
- * Rounds UP to ensure sufficient tokens
+ * Calculate required tokens for pool creation
+ * DISABLED: Streamflow fee removed - using database-only mode
+ * Now just returns the pool amount (rounded up)
  * 
  * @param poolAmount - Pool amount in tokens
  * @param decimals - Token decimals
- * @returns Required amount including Streamflow fee (rounded up)
+ * @returns Required amount (no fee in database-only mode)
  */
 export function calculateRequiredWithFee(poolAmount: number, decimals: number = 9): number {
-  const withFee = poolAmount * STREAMFLOW_FEE_MULTIPLIER;
-  return roundTokenAmountUp(withFee, decimals);
+  // No fee in database-only mode - just return pool amount
+  return roundTokenAmountUp(poolAmount, decimals);
 }
 
 /**
