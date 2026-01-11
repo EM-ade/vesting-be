@@ -1116,6 +1116,62 @@ export class UserVestingController {
         );
       }
 
+      // 5. PRE-TRANSACTION DIAGNOSTICS - Check all account balances
+      console.log("\n========== PRE-TRANSACTION DIAGNOSTICS ==========");
+      console.log(`[DIAG] Vault address: ${vaultKeypair.publicKey.toBase58()}`);
+      console.log(`[DIAG] User address: ${userPublicKey.toBase58()}`);
+      console.log(`[DIAG] Token mint: ${projectTokenMint.toBase58()}`);
+      try {
+        // Check vault SOL balance
+        const vaultSOLBalance = await this.connection.getBalance(vaultKeypair.publicKey);
+        console.log(`[DIAG] Vault SOL balance: ${vaultSOLBalance / LAMPORTS_PER_SOL} SOL (${vaultSOLBalance} lamports)`);
+        
+        // Check user SOL balance
+        const userSOLBalance = await this.connection.getBalance(userPublicKey);
+        console.log(`[DIAG] User SOL balance: ${userSOLBalance / LAMPORTS_PER_SOL} SOL (${userSOLBalance} lamports)`);
+        
+        // Calculate required SOL for user
+        const requiredUserSOL = globalPlatformFeeLamports + poolProjectFeeLamports + 10000; // fees + ~0.00001 SOL network fee estimate
+        console.log(`[DIAG] Required user SOL: ${requiredUserSOL / LAMPORTS_PER_SOL} SOL (${requiredUserSOL} lamports)`);
+        console.log(`[DIAG] User has enough SOL: ${userSOLBalance >= requiredUserSOL ? 'YES ✓' : 'NO ✗'}`);
+        
+        if (!isNativeSOL) {
+          // Check vault token balance
+          try {
+            const vaultTokenAccount = await getAssociatedTokenAddress(
+              projectTokenMint,
+              vaultKeypair.publicKey,
+              false,
+              await this.connection.getAccountInfo(projectTokenMint).then(info => info?.owner || new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"))
+            );
+            const vaultTokenAccountInfo = await this.connection.getTokenAccountBalance(vaultTokenAccount);
+            console.log(`[DIAG] Vault token balance: ${vaultTokenAccountInfo.value.uiAmount} tokens`);
+            console.log(`[DIAG] Required token amount: ${actualClaimAmount}`);
+            console.log(`[DIAG] Vault has enough tokens: ${(vaultTokenAccountInfo.value.uiAmount || 0) >= actualClaimAmount ? 'YES ✓' : 'NO ✗'}`);
+          } catch (tokenErr) {
+            console.error(`[DIAG] Failed to fetch vault token balance:`, tokenErr);
+          }
+        } else {
+          // For native SOL, vault needs claim amount + potential rent
+          const requiredVaultSOL = this.toBaseUnits(actualClaimAmount, 9);
+          console.log(`[DIAG] Required vault SOL for claim: ${actualClaimAmount} SOL (${requiredVaultSOL} lamports)`);
+          console.log(`[DIAG] Vault has enough SOL: ${vaultSOLBalance >= Number(requiredVaultSOL) ? 'YES ✓' : 'NO ✗'}`);
+        }
+        
+        // Log transaction structure
+        console.log(`\n[DIAG] Transaction will contain ${instructions.length} instructions:`);
+        instructions.forEach((ix, idx) => {
+          console.log(`  ${idx + 1}. Program: ${ix.programId.toBase58()}`);
+          console.log(`     Keys: ${ix.keys.length} accounts`);
+          if (ix.programId.equals(SystemProgram.programId)) {
+            console.log(`     Type: System Program (SOL transfer or other)`);
+          }
+        });
+      } catch (diagErr) {
+        console.error("[DIAG] Failed to run diagnostics:", diagErr);
+      }
+      console.log("=================================================\n");
+
       // 5. Create Transaction
       // Added retry logic for blockhash fetching to mitigate transient "fetch failed" errors
       let blockhashRes;
@@ -1169,6 +1225,9 @@ export class UserVestingController {
         transaction.serialize()
       ).toString("base64");
 
+      console.log(`[CLAIM] ✓ Transaction constructed successfully`);
+      console.log(`[CLAIM] Transaction size: ${serializedTransaction.length} bytes (base64)`);
+
       res.json({
         success: true,
         step: "sign_transaction",
@@ -1185,9 +1244,28 @@ export class UserVestingController {
         },
       });
     } catch (error) {
-      console.error("Failed to process claim:", error);
+      console.error("\n========== CLAIM ERROR DETAILS ==========");
+      console.error("Error type:", error?.constructor?.name);
+      console.error("Error message:", error instanceof Error ? error.message : String(error));
+      
+      if (error && typeof error === 'object') {
+        // Log all error properties
+        console.error("Full error object:", JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+      }
+      
+      // If it's a Solana RPC error, it might have logs
+      if (error && typeof error === 'object' && 'logs' in error) {
+        console.error("Transaction logs:", (error as any).logs);
+      }
+      
+      console.error("=========================================\n");
+      
       res.status(500).json({
         error: error instanceof Error ? error.message : "Unknown error",
+        details: error && typeof error === 'object' ? {
+          name: error.constructor?.name,
+          logs: 'logs' in error ? (error as any).logs : undefined,
+        } : undefined,
       });
     }
   }

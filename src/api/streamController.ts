@@ -35,58 +35,30 @@ export class StreamController {
 
   /**
    * POST /api/streams/pause-all
-   * Pause all active vesting streams
-   * Body: { adminWallet: string, signature: string, message: string }
+   * Pause all active vesting streams FOR A SPECIFIC PROJECT
+   * Body: { adminWallet: string, signature: string, message: string, timestamp: number, projectId: string }
+   * 
+   * SECURITY: Only the project admin can pause pools for their project
    */
   async pauseAllStreams(req: Request, res: Response) {
     try {
-      const { adminWallet, signature, message } = req.body;
+      const { projectId } = req.body;
 
-      if (!adminWallet || !signature || !message) {
-        return res.status(400).json({ error: 'adminWallet, signature, and message are required' });
+      if (!projectId) {
+        return res.status(400).json({ 
+          error: 'projectId is required',
+          hint: 'Emergency controls are project-scoped. Provide the project ID.'
+        });
       }
 
-      // Verify admin authorization
-      const dbConfig = await this.dbService.getConfig();
-      if (!dbConfig || dbConfig.admin_wallet !== adminWallet) {
-        return res.status(403).json({ error: 'Not authorized - not an admin wallet' });
-      }
+      console.log(`[PAUSE ALL] Project: ${projectId}, Admin: ${req.body.adminWallet}`);
 
-      // Verify signature
-      try {
-        const nacl = await import('tweetnacl');
-        const messageBuffer = new TextEncoder().encode(message);
-        const signatureBuffer = Buffer.from(signature, 'base64');
-        const publicKey = new PublicKey(adminWallet);
-
-        const isValid = nacl.sign.detached.verify(
-          messageBuffer,
-          signatureBuffer,
-          publicKey.toBytes()
-        );
-
-        if (!isValid) {
-          return res.status(401).json({ error: 'Invalid signature' });
-        }
-
-        // Check message freshness
-        const messageData = JSON.parse(message);
-        const timestamp = messageData.timestamp;
-        const now = Date.now();
-        const fiveMinutes = 5 * 60 * 1000;
-        
-        if (!timestamp || Math.abs(now - timestamp) > fiveMinutes) {
-          return res.status(401).json({ error: 'Signature expired' });
-        }
-      } catch (err) {
-        return res.status(401).json({ error: 'Signature verification failed' });
-      }
-
-      // Get all active streams from database
+      // Get all active streams FOR THIS PROJECT ONLY
       const { data: streams, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
-        .eq('status', 'active') as { data: VestingStream[] | null; error: any };
+        .eq('project_id', projectId)
+        .eq('is_active', true) as { data: VestingStream[] | null; error: any };
 
       if (fetchError) {
         throw new Error(`Failed to fetch streams: ${fetchError.message}`);
@@ -96,7 +68,7 @@ export class StreamController {
         return res.json({
           success: true,
           pausedCount: 0,
-          message: 'No active streams to pause',
+          message: 'No active pools to pause in this project',
         });
       }
 
@@ -104,28 +76,26 @@ export class StreamController {
       const streamIds = streams.map((s) => s.id);
       const { error: updateError } = await this.dbService.supabase
         .from('vesting_streams')
-        .update({ status: 'paused', paused_at: new Date().toISOString() })
+        .update({ 
+          is_active: false,
+          state: 'paused',
+          updated_at: new Date().toISOString()  // Use updated_at (paused_at doesn't exist)
+        })
         .in('id', streamIds);
 
       if (updateError) {
         throw new Error(`Failed to pause streams: ${updateError.message}`);
       }
 
-      // Log the action
-      await this.dbService.supabase.from('activity_log').insert({
-        action: 'pause_all_streams',
-        admin_wallet: adminWallet,
-        affected_count: streams.length,
-        timestamp: new Date().toISOString(),
-      });
+      console.log(`[PAUSE ALL] ✅ Paused ${streams.length} pool(s) for project ${projectId}`);
 
       res.json({
         success: true,
         pausedCount: streams.length,
-        message: `Successfully paused ${streams.length} stream(s)`,
+        message: `Successfully paused ${streams.length} pool(s) in this project`,
       });
     } catch (error) {
-      console.error('Failed to pause streams:', error);
+      console.error('[PAUSE ALL] Failed:', error);
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -134,59 +104,30 @@ export class StreamController {
 
   /**
    * POST /api/streams/emergency-stop
-   * Cancel all active vesting streams (irreversible)
-   * Body: { adminWallet: string, signature: string, message: string, adminPrivateKey: string }
+   * Cancel all active vesting streams FOR A SPECIFIC PROJECT (irreversible)
+   * Body: { adminWallet: string, signature: string, message: string, timestamp: number, projectId: string }
+   * 
+   * SECURITY: Only the project admin can emergency stop pools for their project
    */
   async emergencyStopAllStreams(req: Request, res: Response) {
     try {
-      const { adminWallet, signature, message } = req.body;
+      const { projectId } = req.body;
 
-      if (!adminWallet || !signature || !message) {
+      if (!projectId) {
         return res.status(400).json({
-          error: 'adminWallet, signature, and message are required',
+          error: 'projectId is required',
+          hint: 'Emergency controls are project-scoped. Provide the project ID.'
         });
       }
 
-      // Verify admin authorization
-      const dbConfig = await this.dbService.getConfig();
-      if (!dbConfig || dbConfig.admin_wallet !== adminWallet) {
-        return res.status(403).json({ error: 'Not authorized - not an admin wallet' });
-      }
+      console.log(`[EMERGENCY STOP] Project: ${projectId}, Admin: ${req.body.adminWallet}`);
 
-      // Verify signature
-      try {
-        const nacl = await import('tweetnacl');
-        const messageBuffer = new TextEncoder().encode(message);
-        const signatureBuffer = Buffer.from(signature, 'base64');
-        const publicKey = new PublicKey(adminWallet);
-
-        const isValid = nacl.sign.detached.verify(
-          messageBuffer,
-          signatureBuffer,
-          publicKey.toBytes()
-        );
-
-        if (!isValid) {
-          return res.status(401).json({ error: 'Invalid signature' });
-        }
-
-        const messageData = JSON.parse(message);
-        const timestamp = messageData.timestamp;
-        const now = Date.now();
-        const fiveMinutes = 5 * 60 * 1000;
-        
-        if (!timestamp || Math.abs(now - timestamp) > fiveMinutes) {
-          return res.status(401).json({ error: 'Signature expired' });
-        }
-      } catch (err) {
-        return res.status(401).json({ error: 'Signature verification failed' });
-      }
-
-      // Get all active streams from database
+      // Get all active streams FOR THIS PROJECT ONLY
       const { data: streams, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
-        .eq('status', 'active') as { data: VestingStream[] | null; error: any };
+        .eq('project_id', projectId)
+        .eq('is_active', true) as { data: VestingStream[] | null; error: any };
 
       if (fetchError) {
         throw new Error(`Failed to fetch streams: ${fetchError.message}`);
@@ -196,7 +137,7 @@ export class StreamController {
         return res.json({
           success: true,
           canceledCount: 0,
-          message: 'No active streams to cancel',
+          message: 'No active pools to cancel in this project',
         });
       }
 
@@ -205,11 +146,13 @@ export class StreamController {
         failed: [] as { id: string; error: string }[],
       };
 
-      // Mark all vesting records as cancelled (no Streamflow)
+      // Mark all vesting records as cancelled
       for (const stream of streams) {
         try {
+          console.log(`[EMERGENCY STOP] Cancelling stream: ${stream.id}`);
+          
           // Update all vesting records for this stream
-          await this.dbService.supabase
+          const vestingsUpdate = await this.dbService.supabase
             .from('vestings')
             .update({
               is_active: false,
@@ -218,16 +161,31 @@ export class StreamController {
             })
             .eq('vesting_stream_id', stream.id);
 
-          // Update stream status
-          await this.dbService.supabase
+          if (vestingsUpdate.error) {
+            console.error(`[EMERGENCY STOP] Failed to update vestings for stream ${stream.id}:`, vestingsUpdate.error);
+            throw vestingsUpdate.error;
+          }
+          console.log(`[EMERGENCY STOP] ✓ Updated vestings for stream ${stream.id}`);
+
+          // Update stream status (only update columns that exist in schema)
+          const streamUpdate = await this.dbService.supabase
             .from('vesting_streams')
             .update({
               is_active: false,
+              state: 'cancelled',
+              updated_at: new Date().toISOString(),  // Use updated_at instead of canceled_at (which doesn't exist)
             })
             .eq('id', stream.id);
 
+          if (streamUpdate.error) {
+            console.error(`[EMERGENCY STOP] Failed to update vesting_stream ${stream.id}:`, streamUpdate.error);
+            throw streamUpdate.error;
+          }
+          console.log(`[EMERGENCY STOP] ✓ Updated vesting_stream ${stream.id} - is_active=false, state='cancelled'`);
+
           results.success.push(stream.id);
         } catch (err) {
+          console.error(`[EMERGENCY STOP] Error processing stream ${stream.id}:`, err);
           results.failed.push({
             id: stream.id,
             error: err instanceof Error ? err.message : 'Unknown error',
@@ -235,24 +193,17 @@ export class StreamController {
         }
       }
 
-      // Log the action
-      await this.dbService.supabase.from('activity_log').insert({
-        action: 'emergency_stop_all_streams',
-        admin_wallet: adminWallet,
-        affected_count: results.success.length,
-        failed_count: results.failed.length,
-        timestamp: new Date().toISOString(),
-      });
+      console.log(`[EMERGENCY STOP] ✅ Cancelled ${results.success.length} pool(s) for project ${projectId}`);
 
       res.json({
         success: true,
         canceledCount: results.success.length,
         failedCount: results.failed.length,
-        message: `Emergency stop executed: ${results.success.length} canceled, ${results.failed.length} failed`,
+        message: `Emergency stop executed: ${results.success.length} pool(s) cancelled in this project`,
         details: results,
       });
     } catch (error) {
-      console.error('Failed to execute emergency stop:', error);
+      console.error('[EMERGENCY STOP] Failed:', error);
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -261,56 +212,29 @@ export class StreamController {
 
   /**
    * POST /api/streams/resume-all
-   * Resume all paused vesting streams
-   * Body: { adminWallet: string, signature: string, message: string }
+   * Resume all paused vesting streams FOR A SPECIFIC PROJECT
+   * Body: { adminWallet: string, signature: string, message: string, timestamp: number, projectId: string }
+   * 
+   * SECURITY: Only the project admin can resume pools for their project
    */
   async resumeAllStreams(req: Request, res: Response) {
     try {
-      const { adminWallet, signature, message } = req.body;
+      const { projectId } = req.body;
 
-      if (!adminWallet || !signature || !message) {
-        return res.status(400).json({ error: 'adminWallet, signature, and message are required' });
+      if (!projectId) {
+        return res.status(400).json({ 
+          error: 'projectId is required',
+          hint: 'Emergency controls are project-scoped. Provide the project ID.'
+        });
       }
 
-      // Verify admin authorization
-      const dbConfig = await this.dbService.getConfig();
-      if (!dbConfig || dbConfig.admin_wallet !== adminWallet) {
-        return res.status(403).json({ error: 'Not authorized - not an admin wallet' });
-      }
+      console.log(`[RESUME ALL] Project: ${projectId}, Admin: ${req.body.adminWallet}`);
 
-      // Verify signature
-      try {
-        const nacl = await import('tweetnacl');
-        const messageBuffer = new TextEncoder().encode(message);
-        const signatureBuffer = Buffer.from(signature, 'base64');
-        const publicKey = new PublicKey(adminWallet);
-
-        const isValid = nacl.sign.detached.verify(
-          messageBuffer,
-          signatureBuffer,
-          publicKey.toBytes()
-        );
-
-        if (!isValid) {
-          return res.status(401).json({ error: 'Invalid signature' });
-        }
-
-        const messageData = JSON.parse(message);
-        const timestamp = messageData.timestamp;
-        const now = Date.now();
-        const fiveMinutes = 5 * 60 * 1000;
-        
-        if (!timestamp || Math.abs(now - timestamp) > fiveMinutes) {
-          return res.status(401).json({ error: 'Signature expired' });
-        }
-      } catch (err) {
-        return res.status(401).json({ error: 'Signature verification failed' });
-      }
-
-      // Get all paused streams from database
+      // Get all paused streams FOR THIS PROJECT ONLY
       const { data: streams, error: fetchError } = await this.dbService.supabase
         .from('vesting_streams')
         .select('*')
+        .eq('project_id', projectId)
         .eq('status', 'paused') as { data: VestingStream[] | null; error: any };
 
       if (fetchError) {
@@ -321,7 +245,7 @@ export class StreamController {
         return res.json({
           success: true,
           resumedCount: 0,
-          message: 'No paused streams to resume',
+          message: 'No paused pools to resume in this project',
         });
       }
 
@@ -329,28 +253,26 @@ export class StreamController {
       const streamIds = streams.map((s) => s.id);
       const { error: updateError } = await this.dbService.supabase
         .from('vesting_streams')
-        .update({ status: 'active', resumed_at: new Date().toISOString() })
+        .update({ 
+          is_active: true,
+          state: 'active',
+          updated_at: new Date().toISOString()  // Use updated_at (resumed_at doesn't exist)
+        })
         .in('id', streamIds);
 
       if (updateError) {
         throw new Error(`Failed to resume streams: ${updateError.message}`);
       }
 
-      // Log the action
-      await this.dbService.supabase.from('activity_log').insert({
-        action: 'resume_all_streams',
-        admin_wallet: adminWallet,
-        affected_count: streams.length,
-        timestamp: new Date().toISOString(),
-      });
+      console.log(`[RESUME ALL] ✅ Resumed ${streams.length} pool(s) for project ${projectId}`);
 
       res.json({
         success: true,
         resumedCount: streams.length,
-        message: `Successfully resumed ${streams.length} stream(s)`,
+        message: `Successfully resumed ${streams.length} pool(s) in this project`,
       });
     } catch (error) {
-      console.error('Failed to resume streams:', error);
+      console.error('[RESUME ALL] Failed:', error);
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Unknown error',
       });

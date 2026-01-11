@@ -613,7 +613,7 @@ export class PoolController {
         .single();
 
       const poolCreationFeeUSD = Number(globalConfig?.pool_creation_fee_usd || 0);
-      const feeWallet = globalConfig?.fee_wallet;
+      const feeWallet = globalConfig?.fee_wallet || config.feeWallet?.toBase58();
 
       if (poolCreationFeeUSD > 0) {
         // Convert USD to SOL using real-time price
@@ -1882,7 +1882,7 @@ export class PoolController {
       }
 
       const poolCreationFeeUSD = Number(globalConfig?.pool_creation_fee_usd || 0);
-      const feeWallet = globalConfig?.fee_wallet || null;
+      const feeWallet = globalConfig?.fee_wallet || config.feeWallet?.toBase58() || null;
 
       // If no fee is configured, return zero fee
       if (poolCreationFeeUSD <= 0) {
