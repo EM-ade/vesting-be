@@ -3,7 +3,8 @@ import { Connection, PublicKey, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.j
 import { getAccount, getOrCreateAssociatedTokenAccount, TokenAccountNotFoundError } from '@solana/spl-token';
 import bs58 from 'bs58';
 import { SupabaseService } from '../services/supabaseService';
-import { StreamflowService } from '../services/streamflowService';
+import { PriceService } from '../services/priceService';
+// StreamflowService removed - using database-only mode with custom fees
 import { getVaultKeypairForProject } from '../services/vaultService';
 import { syncDynamicPool } from '../utils/syncDynamicPool';
 import { config } from '../config';
@@ -39,13 +40,14 @@ interface ValidationResult {
 export class PoolController {
   private dbService: SupabaseService;
   private connection: Connection;
-  private streamflowService: StreamflowService;
+  private priceService: PriceService;
 
   constructor() {
     const supabaseClient = getSupabaseClient();
     this.dbService = new SupabaseService(supabaseClient);
-    this.connection = new Connection(getRPCConfig().getRPCEndpoint(), 'confirmed');
-    this.streamflowService = new StreamflowService();
+    const rpcConfig = getRPCConfig();
+    this.connection = new Connection(rpcConfig.getRPCEndpoint(), 'confirmed');
+    this.priceService = new PriceService(this.connection, rpcConfig.getCluster() as 'devnet' | 'mainnet-beta');
   }
 
   /**
@@ -509,39 +511,35 @@ export class PoolController {
         token_mint: req.body.token_mint, // Pass per-pool token mint
       });
 
-      // If validation fails and not skipping Streamflow, return error with options
-      if (!validation.valid && !skipStreamflow) {
-        // FIX: Don't block on missing token account - it will be created atomically
-        // Only block on REAL issues (insufficient SOL, allocation errors, etc.)
+      // DATABASE-ONLY MODE: Always validate treasury has sufficient tokens
+      // This replaces the old Streamflow validation which was skipped when skipStreamflow=true
+      if (!validation.valid) {
+        // Check for REAL issues that should block pool creation
         const hasRealIssues = 
           !validation.checks.treasury.valid ||
           !validation.checks.allocations.valid ||
-          (validation.checks.solBalance.valid === false) || // Still need minimum SOL
-          (validation.checks.tokenBalance.valid === false && validation.checks.tokenBalance.current > 0); // Only block if account exists but has insufficient tokens
+          (validation.checks.tokenBalance.valid === false && validation.checks.tokenBalance.current > 0); // Block if account exists but has insufficient tokens
 
         if (hasRealIssues) {
           return res.status(400).json({
             success: false,
             error: 'Pool validation failed',
-            errorType: validation.checks.solBalance.valid ? 'INSUFFICIENT_TOKENS' : 'INSUFFICIENT_SOL',
+            errorType: !validation.checks.tokenBalance.valid ? 'INSUFFICIENT_TOKENS' : 'VALIDATION_ERROR',
             validation,
-            options: {
-              canProceedWithoutStreamflow: validation.canProceedWithoutStreamflow,
-              canAdjustTimestamp: !validation.checks.timestamp.valid,
-              adjustedTimestamp: validation.checks.timestamp.adjustedStart,
-            },
             suggestions: [
-              ...(!validation.checks.solBalance.valid ? [`Fund treasury wallet (${validation.checks.treasury.address}) with at least ${validation.checks.solBalance.required} SOL`] : []),
               ...(!validation.checks.tokenBalance.valid && validation.checks.tokenBalance.current > 0 ? [
-                `Treasury wallet has ${validation.checks.tokenBalance.current} tokens but needs ${total_pool_amount * 1.005} (includes 0.5% Streamflow fee buffer)`,
-                `Transfer ${(total_pool_amount * 1.005) - validation.checks.tokenBalance.current} more tokens, or`,
-                `Enable "Skip Streamflow Deployment" to create a database-only pool`
+                `Treasury wallet has ${validation.checks.tokenBalance.current} tokens but needs ${total_pool_amount}`,
+                `Transfer ${total_pool_amount - validation.checks.tokenBalance.current} more tokens to the treasury`,
+              ] : []),
+              ...(!validation.checks.tokenBalance.valid && validation.checks.tokenBalance.current === 0 ? [
+                `Treasury token account does not exist or has no balance`,
+                `Fund the treasury with at least ${total_pool_amount} tokens before creating the pool`,
               ] : []),
               ...(validation.checks.allocations.valid === false ? ['Fix allocation errors before proceeding'] : []),
             ],
           });
         } else {
-          // No real issues - warnings only (missing token account, past timestamp, etc.)
+          // No real issues - warnings only (past timestamp, etc.)
           console.log('[VALIDATION] Only warnings present - allowing pool creation to proceed');
         }
       }
@@ -603,14 +601,98 @@ export class PoolController {
         token_mint: poolTokenMint, // Add token mint from request or project
       };
 
-      // Declare these outside the try block for error logging
-      let adminKeypair: Keypair | undefined = undefined;
-      let tokenMint: PublicKey | undefined = undefined;
+      // ========== POOL CREATION FEE ==========
+      // Get pool creation fee from config (in USD) and convert to SOL
+      let creationFeePaidSOL = 0;
+      let creationFeeTx: string | null = null;
+      
+      const { data: globalConfig } = await this.dbService.supabase
+        .from('config')
+        .select('pool_creation_fee_usd, fee_wallet')
+        .eq('id', 1)
+        .single();
 
-      // Auto-deploy to Streamflow FIRST (unless skipped)
-      if (!skipStreamflow) {
+      const poolCreationFeeUSD = Number(globalConfig?.pool_creation_fee_usd || 0);
+      const feeWallet = globalConfig?.fee_wallet || config.feeWallet?.toBase58();
+
+      if (poolCreationFeeUSD > 0) {
+        // Convert USD to SOL using real-time price
+        const { solAmount, solPrice } = await this.priceService.calculateSolFee(poolCreationFeeUSD);
+        creationFeePaidSOL = solAmount;
+        
+        console.log(`[POOL CREATION FEE] Fee: $${poolCreationFeeUSD} USD = ${solAmount.toFixed(6)} SOL (@ $${solPrice}/SOL)`);
+
+        // Check if fee transaction was provided
+        const feeTransactionSignature = req.body.fee_transaction_signature;
+        
+        if (!feeTransactionSignature) {
+          // Return fee info so frontend can request payment
+          return res.status(402).json({
+            error: 'Pool creation fee required',
+            fee: {
+              usd: poolCreationFeeUSD,
+              sol: solAmount,
+              solPrice: solPrice,
+              feeWallet: feeWallet,
+            },
+            message: `Pool creation requires a fee of $${poolCreationFeeUSD} USD (${solAmount.toFixed(6)} SOL). Please pay the fee and include the transaction signature.`,
+          });
+        }
+
+        // Verify the fee transaction on-chain
         try {
-          console.log('Auto-deploying pool to Streamflow...');
+          console.log(`[POOL CREATION FEE] Verifying fee transaction: ${feeTransactionSignature}`);
+          
+          const txInfo = await this.connection.getTransaction(feeTransactionSignature, {
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+          });
+
+          if (!txInfo) {
+            return res.status(400).json({
+              error: 'Fee transaction not found or not confirmed',
+              signature: feeTransactionSignature,
+            });
+          }
+
+          // Basic validation - transaction should be successful
+          if (txInfo.meta?.err) {
+            return res.status(400).json({
+              error: 'Fee transaction failed',
+              signature: feeTransactionSignature,
+              txError: txInfo.meta.err,
+            });
+          }
+
+          creationFeeTx = feeTransactionSignature;
+          console.log(`[POOL CREATION FEE] ✅ Fee transaction verified: ${feeTransactionSignature}`);
+        } catch (verifyErr) {
+          console.error('[POOL CREATION FEE] Failed to verify fee transaction:', verifyErr);
+          return res.status(400).json({
+            error: 'Failed to verify fee transaction',
+            signature: feeTransactionSignature,
+            details: verifyErr instanceof Error ? verifyErr.message : 'Unknown error',
+          });
+        }
+      } else {
+        console.log('[POOL CREATION FEE] No pool creation fee configured (fee is $0)');
+      }
+      // ========== END POOL CREATION FEE ==========
+
+      // Add fee info to pool data
+      const poolDataWithFee = {
+        ...poolData,
+        creation_fee_paid: creationFeePaidSOL,
+        creation_fee_tx: creationFeeTx,
+      };
+
+      // Streamflow integration removed - all pools are database-only now
+      console.log('⚠️  Database-only mode - Streamflow integration removed');
+
+      /* STREAMFLOW CODE REMOVED - keeping structure for reference
+      if (false) {
+        // This block will never execute - Streamflow has been removed
+        console.log('Auto-deploying pool to Streamflow...');
 
           // Parse admin keypair
           // PRIORITY: Use token_mint from request body if provided (per-pool token)
@@ -902,16 +984,14 @@ export class PoolController {
 
           console.log('✅ Pool deployed to Streamflow:', streamflowId);
         } catch (error) {
-          // CRITICAL: If Streamflow fails, throw error to prevent DB creation
           const streamflowError = error instanceof Error ? error.message : 'Unknown error';
           console.error('❌ Failed to deploy to Streamflow:', streamflowError);
           throw new Error(`Streamflow deployment failed: ${streamflowError}`);
         }
-      } else {
-        console.log('⚠️  Skipping Streamflow deployment (skipStreamflow=true)');
       }
+      END OF STREAMFLOW CODE REMOVED */
 
-      // Only create DB record if Streamflow succeeded (or was skipped)
+      // Create DB record (database-only mode)
       // CRITICAL: Wrap DB operations in error handling with context
       console.log('Creating pool in database...');
       let stream: any;
@@ -919,44 +999,21 @@ export class PoolController {
       try {
         const { data, error: dbError } = await this.dbService.supabase
           .from('vesting_streams')
-          .insert({
-            ...poolData,
-            streamflow_stream_id: streamflowId, // Add Streamflow ID if deployed
-          })
+          .insert(poolDataWithFee)
           .select()
           .single();
 
         if (dbError) {
-          // CRITICAL: If DB fails after Streamflow success, we have an orphaned on-chain pool
-          // Log this with all details for manual recovery
-          if (streamflowId) {
-            console.error('❌ CRITICAL: Database insert failed after Streamflow deployment succeeded!');
-            console.error('Orphaned Streamflow Pool Details:', {
-              streamflowId,
-              signature: streamflowSignature,
-              poolName: poolData.name,
-              totalAmount: poolData.total_pool_amount,
-              treasury: adminKeypair?.publicKey.toBase58() || 'Unknown',
-              timestamp: new Date().toISOString(),
-            });
-            console.error('⚠️  Manual recovery required: Add this pool to database manually or cancel on Streamflow');
-          }
+          // Database-only mode - no orphaned on-chain pool concerns
+          console.error('❌ Failed to create pool in database:', dbError.message);
           throw new Error(`Failed to create pool in database: ${dbError.message}`);
         }
 
         stream = data;
         console.log('✅ Pool created in database with ID:', stream.id);
       } catch (dbErr) {
-        // Re-throw with context about potential orphaned state
+        // Database-only mode - simple error handling
         const errorMsg = dbErr instanceof Error ? dbErr.message : 'Unknown database error';
-        if (streamflowId) {
-          throw new Error(
-            `Database creation failed after Streamflow deployment. ` +
-            `Streamflow Pool ID: ${streamflowId}. ` +
-            `Error: ${errorMsg}. ` +
-            `Manual cleanup may be required.`
-          );
-        }
         throw new Error(`Failed to create pool in database: ${errorMsg}`);
       }
 
@@ -1579,16 +1636,12 @@ export class PoolController {
         });
       }
 
-      // Get Streamflow status
-      const status = await this.streamflowService.getPoolStatus(pool.streamflow_stream_id);
-      const vestedAmount = await this.streamflowService.getVestedAmount(pool.streamflow_stream_id);
-
+      // Streamflow integration removed - return database-only status
       res.json({
-        deployed: true,
-        streamflowId: pool.streamflow_stream_id,
-        ...status,
-        vestedAmount,
-        vestedPercentage: (vestedAmount / status.depositedAmount) * 100,
+        deployed: false,
+        message: 'Streamflow integration removed. All pools are database-only.',
+        poolId: pool.id,
+        creationFeePaid: pool.creation_fee_paid || 0,
       });
     } catch (error) {
       console.error('Failed to get Streamflow status:', error);
@@ -1755,45 +1808,8 @@ export class PoolController {
         }
       }
 
-      // Cancel Streamflow pool if deployed
-      if (pool.streamflow_stream_id && this.streamflowService) {
-        try {
-          // Parse admin keypair
-          let adminKeypair: Keypair;
-          if (config.adminPrivateKey.startsWith('[')) {
-            const secretKey = Uint8Array.from(JSON.parse(config.adminPrivateKey));
-            adminKeypair = Keypair.fromSecretKey(secretKey);
-          } else {
-            const decoded = bs58.decode(config.adminPrivateKey);
-            adminKeypair = Keypair.fromSecretKey(decoded);
-          }
-
-          // Resolve token mint
-          const tokenMint = pool.token_mint ? new PublicKey(pool.token_mint) : (config.customTokenMint || new PublicKey('So11111111111111111111111111111111111111112')); // Fallback if no custom mint
-
-          // Ensure admin has an Associated Token Account (ATA) for this mint
-          // This fixes "TokenAccountNotFoundError" by creating it if it doesn't exist
-          try {
-            console.log(`[POOL] Ensuring ATA exists for admin ${adminKeypair.publicKey.toBase58()} and mint ${tokenMint.toBase58()}...`);
-            const adminAta = await getOrCreateAssociatedTokenAccount(
-              this.connection,
-              adminKeypair, // Payer
-              tokenMint,
-              adminKeypair.publicKey // Owner
-            );
-            console.log(`[POOL] Admin ATA ready: ${adminAta.address.toBase58()}`);
-          } catch (ataError) {
-            console.error('[POOL] Failed to ensure admin ATA exists:', ataError);
-            // We continue, as it might already exist or Streamflow might handle it (though unlikely if it failed before)
-          }
-
-          await this.streamflowService.cancelPool(pool.streamflow_stream_id, adminKeypair);
-          console.log('Streamflow pool cancelled:', pool.streamflow_stream_id);
-        } catch (err) {
-          console.error('Failed to cancel Streamflow pool:', err);
-          // Continue with DB deactivation even if Streamflow cancel fails
-        }
-      }
+      // Streamflow integration removed - database-only cancellation
+      console.log(`[POOL] Cancelling database-only pool: ${pool.id}`);
 
       // SECURITY: Deactivate pool in database - verify project ownership
       const { data: updatedPool, error: updateError } = await this.dbService.supabase
@@ -1844,73 +1860,61 @@ export class PoolController {
   }
 
   /**
-   * POST /api/pools/:id/deploy-streamflow
-   * Deploy pool to Streamflow (creates on-chain vesting stream)
+   * GET /api/pools/get-creation-fee
+   * Returns the pool creation fee from config (in USD and converted to SOL)
+   * Used by frontend to display fee before pool creation
    */
-  async deployToStreamflow(req: Request, res: Response) {
+  async getCreationFee(req: Request, res: Response) {
     try {
-      const { id } = req.params;
-
-      // Get pool details
-      const { data: pool, error: fetchError } = await this.dbService.supabase
-        .from('vesting_streams')
-        .select('*')
-        .eq('id', id)
+      // Get pool creation fee from config
+      const { data: globalConfig, error: configError } = await this.dbService.supabase
+        .from('config')
+        .select('pool_creation_fee_usd, fee_wallet')
+        .eq('id', 1)
         .single();
 
-      if (fetchError || !pool) {
-        return res.status(404).json({ error: 'Pool not found' });
+      if (configError) {
+        console.error('[GET CREATION FEE] Failed to fetch config:', configError);
+        return res.status(500).json({
+          error: 'Failed to fetch fee configuration',
+          details: configError.message,
+        });
       }
 
-      if (pool.streamflow_stream_id) {
-        return res.status(400).json({ error: 'Pool already deployed to Streamflow' });
+      const poolCreationFeeUSD = Number(globalConfig?.pool_creation_fee_usd || 0);
+      const feeWallet = globalConfig?.fee_wallet || config.feeWallet?.toBase58() || null;
+
+      // If no fee is configured, return zero fee
+      if (poolCreationFeeUSD <= 0) {
+        return res.json({
+          feeRequired: false,
+          fee: {
+            usd: 0,
+            sol: 0,
+            solPrice: 0,
+            feeWallet: null,
+          },
+          message: 'No pool creation fee configured',
+        });
       }
 
-      // Parse admin keypair
-      let adminKeypair: Keypair;
-      try {
-        if (config.adminPrivateKey.startsWith('[')) {
-          const secretKey = Uint8Array.from(JSON.parse(config.adminPrivateKey));
-          adminKeypair = Keypair.fromSecretKey(secretKey);
-        } else {
-          const decoded = bs58.decode(config.adminPrivateKey);
-          adminKeypair = Keypair.fromSecretKey(decoded);
-        }
-      } catch (err) {
-        return res.status(500).json({ error: 'Invalid admin key configuration' });
-      }
+      // Convert USD to SOL using real-time price
+      const { solAmount, solPrice } = await this.priceService.calculateSolFee(poolCreationFeeUSD);
 
-      // Create Streamflow pool
-      const startTime = Math.floor(new Date(pool.start_time).getTime() / 1000);
-      const endTime = Math.floor(new Date(pool.end_time).getTime() / 1000);
-
-      const result = await this.streamflowService.createVestingPool({
-        adminKeypair,
-        tokenMint: config.customTokenMint!,
-        totalAmount: pool.total_pool_amount,
-        startTime,
-        endTime,
-        poolName: pool.name,
-      });
-
-      // Update database with Streamflow ID
-      const { error: updateError } = await this.dbService.supabase
-        .from('vesting_streams')
-        .update({ streamflow_stream_id: result.streamId })
-        .eq('id', id);
-
-      if (updateError) {
-        throw new Error(`Failed to update pool: ${updateError.message}`);
-      }
+      console.log(`[GET CREATION FEE] Fee: $${poolCreationFeeUSD} USD = ${solAmount.toFixed(6)} SOL (@ $${solPrice}/SOL)`);
 
       res.json({
-        success: true,
-        streamflowId: result.streamId,
-        signature: result.signature,
-        message: 'Pool deployed to Streamflow successfully',
+        feeRequired: true,
+        fee: {
+          usd: poolCreationFeeUSD,
+          sol: solAmount,
+          solPrice: solPrice,
+          feeWallet: feeWallet,
+        },
+        message: `Pool creation requires a fee of $${poolCreationFeeUSD} USD (${solAmount.toFixed(6)} SOL)`,
       });
     } catch (error) {
-      console.error('Failed to deploy to Streamflow:', error);
+      console.error('[GET CREATION FEE] Error:', error);
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -1918,96 +1922,25 @@ export class PoolController {
   }
 
   /**
+   * POST /api/pools/:id/deploy-streamflow
+   * @deprecated Streamflow integration removed - all pools are database-only
+   */
+  async deployToStreamflow(req: Request, res: Response) {
+    return res.status(410).json({
+      error: 'Streamflow integration has been removed',
+      message: 'All pools are now database-only. No external deployment is required.',
+    });
+  }
+
+  /**
    * POST /api/pools/:id/cancel-streamflow
-   * Cancel a Streamflow pool and reclaim rent + unvested tokens
-   * Accepts either database pool ID or Streamflow stream ID
+   * @deprecated Streamflow integration removed - use standard cancel endpoint
    */
   async cancelStreamflowPool(req: Request, res: Response) {
-    try {
-      const { id } = req.params;
-      const { streamflowId } = req.body; // Optional: direct Streamflow ID
-
-      if (!id && !streamflowId) {
-        return res.status(400).json({ error: 'Pool ID or Streamflow ID is required' });
-      }
-
-      let streamId: string;
-      let poolId: string | null = null;
-
-      // If streamflowId provided directly, use it
-      if (streamflowId) {
-        streamId = streamflowId;
-
-        // Try to find pool in database for cleanup
-        const { data: pool } = await this.dbService.supabase
-          .from('vesting_streams')
-          .select('id')
-          .eq('streamflow_stream_id', streamflowId)
-          .single();
-
-        if (pool) {
-          poolId = pool.id;
-        }
-      } else {
-        // Get pool details from database
-        const { data: pool, error: poolError } = await this.dbService.supabase
-          .from('vesting_streams')
-          .select('*')
-          .eq('id', id)
-          .single();
-
-        if (poolError || !pool) {
-          return res.status(404).json({ error: 'Pool not found' });
-        }
-
-        if (!pool.streamflow_stream_id) {
-          return res.status(400).json({ error: 'Pool is not deployed to Streamflow' });
-        }
-
-        streamId = pool.streamflow_stream_id;
-        poolId = pool.id;
-      }
-
-      // Parse admin keypair
-      let adminKeypair: Keypair;
-      if (config.adminPrivateKey.startsWith('[')) {
-        const secretKey = Uint8Array.from(JSON.parse(config.adminPrivateKey));
-        adminKeypair = Keypair.fromSecretKey(secretKey);
-      } else {
-        const decoded = bs58.decode(config.adminPrivateKey);
-        adminKeypair = Keypair.fromSecretKey(decoded);
-      }
-
-      // Cancel the stream
-      const result = await this.streamflowService.cancelVestingPool(
-        streamId,
-        adminKeypair
-      );
-
-      // Update database if pool found
-      if (poolId) {
-        await this.dbService.supabase
-          .from('vesting_streams')
-          .update({
-            is_active: false,
-            state: 'cancelled', // Explicitly update state
-            streamflow_stream_id: null // Clear Streamflow ID
-          })
-          .eq('id', poolId);
-      }
-
-      res.json({
-        success: true,
-        signature: result.signature,
-        streamflowId: streamId,
-        message: 'Pool canceled successfully. Rent and unvested tokens returned to treasury.',
-      });
-    } catch (error) {
-      console.error('Failed to cancel pool:', error);
-      res.status(500).json({
-        error: error instanceof Error ? error.message : 'Unknown error',
-      });
-    }
+    return res.status(410).json({
+      error: 'Streamflow integration has been removed',
+      message: 'All pools are now database-only. Use the standard /api/pools/:id/cancel endpoint.',
+    });
   }
 
   /**

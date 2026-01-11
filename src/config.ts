@@ -27,9 +27,10 @@ export const config = {
   treasuryPrivateKey: process.env.TREASURY_PRIVATE_KEY || "",
   adminPrivateKey:
     process.env.ADMIN_PRIVATE_KEY || process.env.TREASURY_PRIVATE_KEY || "",
-  feeWallet: process.env.FEE_WALLET
-    ? new PublicKey(process.env.FEE_WALLET)
-    : undefined,
+  // Global fee wallet (used as fallback when DB config doesn't specify one)
+  feeWallet: new PublicKey(
+    process.env.FEE_WALLET || "FWZMxjUhzt58r5ZkzrQ8X9tvJC6Xh4FJtEBRzxMTDtxi"
+  ),
   customTokenMint: process.env.CUSTOM_TOKEN_MINT
     ? new PublicKey(process.env.CUSTOM_TOKEN_MINT)
     : undefined,
