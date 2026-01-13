@@ -5,6 +5,7 @@ import NodeCache from "node-cache";
 import { SupabaseService } from "../services/supabaseService";
 import { config } from "../config";
 import { getRPCConfig } from '../config';
+import { getTokenSymbol as fetchTokenSymbol } from "../services/tokenMetadataService";
 
 /**
  * Metrics API Controller
@@ -489,7 +490,7 @@ export class MetricsController {
       const tokenMetrics: Record<string, any> = {};
 
       for (const [tokenMint, streamIds] of streamsByToken.entries()) {
-        const tokenSymbol = this.getTokenSymbol(tokenMint);
+        const tokenSymbol = await fetchTokenSymbol(tokenMint); // ✅ Dynamic token resolution
 
         let totalAllocated = 0;
         let totalClaimedRaw = 0;
@@ -516,7 +517,7 @@ export class MetricsController {
             totalAllocated,
             totalClaimed
           ),
-          recommendations: this.generateTokenRecommendations(
+          recommendations: await this.generateTokenRecommendations(
             tokenMint,
             totalAllocated,
             totalClaimed
@@ -743,18 +744,8 @@ export class MetricsController {
   /**
    * Helper: Get token symbol from mint address
    */
-  private getTokenSymbol(tokenMint: string): string {
-    const tokenSymbols: { [key: string]: string } = {
-      So11111111111111111111111111111111111111112: "SOL",
-      EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: "USDC",
-      Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: "USDT",
-    };
-
-    return (
-      tokenSymbols[tokenMint] ||
-      `${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`
-    );
-  }
+  // ✅ REMOVED: Replaced with dynamic token metadata fetching
+  // See tokenMetadataService.ts for the new implementation
 
   /**
    * Helper: Calculate projected days until completion
@@ -777,15 +768,15 @@ export class MetricsController {
   /**
    * Helper: Generate token-specific recommendations
    */
-  private generateTokenRecommendations(
+  private async generateTokenRecommendations(
     tokenMint: string,
     totalAllocated: number,
     totalClaimed: number
-  ): string[] {
+  ): Promise<string[]> {
     const recommendations: string[] = [];
     const claimPercentage =
       totalAllocated > 0 ? (totalClaimed / totalAllocated) * 100 : 0;
-    const tokenSymbol = this.getTokenSymbol(tokenMint);
+    const tokenSymbol = await fetchTokenSymbol(tokenMint); // ✅ Dynamic token resolution
 
     if (claimPercentage > 80) {
       recommendations.push(

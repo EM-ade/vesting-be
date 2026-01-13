@@ -27,6 +27,7 @@ import { cache } from "../lib/cache";
 import Decimal from "decimal.js";
 import { EligibilityService } from "../services/eligibilityService";
 import { getRPCConfig } from '../config';
+import { getTokenSymbol as fetchTokenSymbol } from "../services/tokenMetadataService";
 
 /**
  * User Vesting API Controller
@@ -458,6 +459,8 @@ export class UserVestingController {
           eligible: vesting.is_active && !vesting.is_cancelled,
           claimsEnabled, // Add this flag so frontend knows if claims are disabled
           poolPaused: isPoolPaused, // Explicit flag for paused state
+          tokenMint: stream.token_mint, // ✅ FIX: Include token mint
+          tokenSymbol: await fetchTokenSymbol(stream.token_mint || "So11111111111111111111111111111111111111112"), // ✅ Dynamic token resolution
           streamflow: {
             deployed: !!stream.streamflow_stream_id,
             streamId: stream.streamflow_stream_id || null,
@@ -1604,7 +1607,7 @@ export class UserVestingController {
         // Add token data
         tokensData.push({
           tokenMint: tokenMint,
-          tokenSymbol: this.getTokenSymbol(tokenMint), // Helper function to get symbol
+          tokenSymbol: await fetchTokenSymbol(tokenMint), // ✅ Dynamic token resolution
           totalClaimable,
           totalLocked,
           totalClaimed,
@@ -1639,7 +1642,7 @@ export class UserVestingController {
         if (!tokenData) {
           tokenData = {
             tokenMint: mint,
-            tokenSymbol: this.getTokenSymbol(mint),
+            tokenSymbol: await fetchTokenSymbol(mint), // ✅ Dynamic token resolution
             totalClaimable: 0,
             totalLocked: 0,
             totalClaimed: 0,
@@ -3116,20 +3119,8 @@ export class UserVestingController {
   /**
    * Helper: Calculate vested percentage based on time
    */
-  private getTokenSymbol(tokenMint: string): string {
-    // Map common token mints to their symbols
-    const tokenSymbols: { [key: string]: string } = {
-      So11111111111111111111111111111111111111112: "SOL",
-      EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: "USDC",
-      Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: "USDT",
-      // Add more token mappings as needed
-    };
-
-    return (
-      tokenSymbols[tokenMint] ||
-      `${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`
-    );
-  }
+  // ✅ REMOVED: Replaced with dynamic token metadata fetching
+  // See tokenMetadataService.ts for the new implementation
 
   private calculateVestedPercentage(
     now: number,
