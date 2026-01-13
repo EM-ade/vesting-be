@@ -7,6 +7,7 @@ import { config } from "../config";
 import { getSupabaseClient } from "../lib/supabaseClient";
 import { getVaultKeypairForProject } from "../services/vaultService";
 import { getRPCConfig } from '../config';
+import { getTokenSymbol as fetchTokenSymbol } from "../services/tokenMetadataService";
 
 /**
  * Treasury Management API Controller
@@ -428,16 +429,9 @@ export class TreasuryController {
               const locked = lockedPerToken[mintAddress] || 0;
               const available = Math.max(0, totalAmount - locked);
 
-              // Determine symbol
-              let symbol = "Unknown";
-              if (mintAddress === tokenMint.toBase58()) {
-                symbol = projectData?.symbol || "Token";
-              } else if (mintAddress === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") {
-                symbol = "USDC";
-              }
-
+              // ✅ FIX: Will fetch dynamic symbols after this map
               return {
-                symbol,
+                symbol: "Loading...", // Temporary, will be replaced with dynamic fetch
                 balance: available, // ✅ Show available balance, not total
                 mint: mintAddress,
               };
@@ -447,6 +441,13 @@ export class TreasuryController {
           tokens = [...tokens, ...spl_tokens];
         } catch (err) {
           console.warn("Failed to parse SPL token accounts:", err);
+        }
+      }
+
+      // ✅ FIX: Fetch dynamic symbols for all tokens (excluding SOL which is already correct)
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].symbol !== "SOL") {
+          tokens[i].symbol = await fetchTokenSymbol(tokens[i].mint);
         }
       }
       
@@ -521,7 +522,7 @@ export class TreasuryController {
         const allocated = allocationsByToken.get(mint) || 0;
         const claimed = claimsByToken.get(mint) || 0;
         const balance = tokens.find((t) => t.mint === mint)?.balance || 0;
-        const symbol = this.getTokenSymbol(mint);
+        const symbol = await fetchTokenSymbol(mint); // ✅ Dynamic token resolution
 
         tokenBreakdown.push({
           tokenMint: mint,
@@ -688,7 +689,7 @@ export class TreasuryController {
         // Determine token mint for this pool
         const tokenMint =
           stream.token_mint || (await this.getProjectDefaultMint(projectId));
-        const tokenSymbol = this.getTokenSymbol(tokenMint);
+        const tokenSymbol = await fetchTokenSymbol(tokenMint); // ✅ Dynamic token resolution
 
         // Update token totals
         if (!tokenTotals.has(tokenMint)) {
@@ -722,15 +723,17 @@ export class TreasuryController {
       }
 
       // Build per-token summary
-      const tokenBreakdown = Array.from(tokenTotals.entries()).map(
-        ([mint, totals]) => ({
-          tokenMint: mint,
-          tokenSymbol: this.getTokenSymbol(mint),
-          totalAllocated: totals.totalAllocated,
-          totalClaimed: totals.totalClaimed,
-          remainingNeeded: totals.totalAllocated - totals.totalClaimed,
-          poolCount: totals.poolCount,
-        })
+      const tokenBreakdown = await Promise.all(
+        Array.from(tokenTotals.entries()).map(
+          async ([mint, totals]) => ({
+            tokenMint: mint,
+            tokenSymbol: await fetchTokenSymbol(mint), // ✅ Dynamic token resolution
+            totalAllocated: totals.totalAllocated,
+            totalClaimed: totals.totalClaimed,
+            remainingNeeded: totals.totalAllocated - totals.totalClaimed,
+            poolCount: totals.poolCount,
+          })
+        )
       );
 
       res.json({
@@ -759,19 +762,8 @@ export class TreasuryController {
     }
   }
 
-  private getTokenSymbol(tokenMint: string): string {
-    // Map common token mints to their symbols
-    const tokenSymbols: { [key: string]: string } = {
-      So11111111111111111111111111111111111111112: "SOL",
-      EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: "USDC",
-      Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: "USDT",
-    };
-
-    return (
-      tokenSymbols[tokenMint] ||
-      `${tokenMint.slice(0, 4)}...${tokenMint.slice(-4)}`
-    );
-  }
+  // ✅ REMOVED: Replaced with dynamic token metadata fetching
+  // See tokenMetadataService.ts for the new implementation
 
   private async getProjectDefaultMint(
     projectId: string | undefined
