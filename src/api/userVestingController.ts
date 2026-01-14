@@ -79,6 +79,22 @@ export class UserVestingController {
     this.priceService = new PriceService(this.connection, cluster);
     this.eligibilityService = new EligibilityService();
   }
+  
+  /**
+   * Helper function to get token decimals with fallback
+   * ✅ FIX: Handles network errors gracefully - CRITICAL FOR MULTI-DECIMAL TOKENS
+   */
+  private async getTokenDecimals(tokenMint: PublicKey): Promise<number> {
+    try {
+      const { getMint } = await import("@solana/spl-token");
+      const mintInfo = await getMint(this.connection, tokenMint);
+      console.log(`[TOKEN] Using ${mintInfo.decimals} decimals for ${tokenMint.toBase58()}`);
+      return mintInfo.decimals;
+    } catch (err) {
+      console.warn(`[TOKEN] Failed to fetch decimals for ${tokenMint.toBase58()}, using default 9:`, err);
+      return 9; // Default fallback for SPL tokens
+    }
+  }
 
   /**
    * GET /api/user/vesting/list?wallet=xxx
@@ -335,8 +351,19 @@ export class UserVestingController {
 
       // Get user's claim history for THIS specific vesting only
       const claimHistory = await this.dbService.getClaimHistory(wallet);
-      const TOKEN_DECIMALS = 9;
+      
+      // ✅ FIX: Get actual token decimals from the vesting stream's token mint
+      const tokenMintAddress = stream.token_mint || (req.project as any)?.mint_address;
+      let TOKEN_DECIMALS = 9; // Default fallback
+      if (tokenMintAddress) {
+        try {
+          TOKEN_DECIMALS = await this.getTokenDecimals(new PublicKey(tokenMintAddress));
+        } catch (err) {
+          console.warn(`[LIST] Failed to get decimals for ${tokenMintAddress}, using default 9`);
+        }
+      }
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
+      
       // Filter claims for this specific vesting
       const vestingClaims = claimHistory.filter(
         (claim) => claim.vesting_id === vesting.id
@@ -569,20 +596,35 @@ export class UserVestingController {
       }
 
       // Format history for frontend (convert from base units to human-readable)
-      const TOKEN_DECIMALS = 9;
-      const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
-
-      const formattedHistory = historyWithVestings.map((claim: any) => ({
-        id: claim.id,
-        date: claim.claimed_at,
-        amount: Number(claim.amount_claimed) / TOKEN_DIVISOR,
-        feePaid: Number(claim.fee_paid),
-        transactionSignature: claim.transaction_signature,
-        status: "Claimed", // All records in history are claimed
-        vestingId: claim.vestings?.id || null,
-        poolName: claim.vestings?.vesting_streams?.name || "Unknown Pool",
-        poolState: claim.vestings?.vesting_streams?.state || "active",
-      }));
+      // ✅ FIX: Use dynamic decimals per claim based on the token mint
+      const formattedHistory = await Promise.all(
+        historyWithVestings.map(async (claim: any) => {
+          let TOKEN_DECIMALS = 9; // Default fallback
+          const tokenMintAddress = claim.vestings?.vesting_streams?.token_mint;
+          
+          if (tokenMintAddress) {
+            try {
+              TOKEN_DECIMALS = await this.getTokenDecimals(new PublicKey(tokenMintAddress));
+            } catch (err) {
+              console.warn(`[HISTORY] Failed to get decimals for ${tokenMintAddress}, using default 9`);
+            }
+          }
+          
+          const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
+          
+          return {
+            id: claim.id,
+            date: claim.claimed_at,
+            amount: Number(claim.amount_claimed) / TOKEN_DIVISOR,
+            feePaid: Number(claim.fee_paid),
+            transactionSignature: claim.transaction_signature,
+            status: "Claimed", // All records in history are claimed
+            vestingId: claim.vestings?.id || null,
+            poolName: claim.vestings?.vesting_streams?.name || "Unknown Pool",
+            poolState: claim.vestings?.vesting_streams?.state || "active",
+          };
+        })
+      );
 
       res.json({
         success: true,
@@ -672,7 +714,17 @@ export class UserVestingController {
       // Get claim history and calculate available amounts per pool
       // Optimized: Fetch vestings with claim history in single query
       const claimHistory = await this.dbService.getClaimHistory(userWallet);
-      const TOKEN_DECIMALS = 9;
+      
+      // ✅ FIX: Get actual token decimals from the first vesting stream's token mint
+      const tokenMintAddress = validVestings[0]?.vesting_streams?.token_mint;
+      let TOKEN_DECIMALS = 9; // Default fallback
+      if (tokenMintAddress) {
+        try {
+          TOKEN_DECIMALS = await this.getTokenDecimals(new PublicKey(tokenMintAddress));
+        } catch (err) {
+          console.warn(`[CLAIM] Failed to get decimals for ${tokenMintAddress}, using default 9`);
+        }
+      }
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
       // DISABLED: Streamflow integration - using database-only mode for cost savings
@@ -1103,10 +1155,20 @@ export class UserVestingController {
         }
 
         // Token Transfer (Vault -> User)
+        // ✅ FIX: Get actual token decimals instead of hardcoded 9
+        const tokenDecimals = await this.getTokenDecimals(projectTokenMint);
         const amountInBaseUnits = this.toBaseUnits(
           actualClaimAmount,
-          TOKEN_DECIMALS
+          tokenDecimals
         );
+        
+        console.log(`\n========== CLAIM CONVERSION DEBUG ==========`);
+        console.log(`[CLAIM] Token: ${projectTokenMint.toBase58()}`);
+        console.log(`[CLAIM] Decimals: ${tokenDecimals}`);
+        console.log(`[CLAIM] Amount (UI): ${actualClaimAmount}`);
+        console.log(`[CLAIM] Base Units: ${amountInBaseUnits}`);
+        console.log(`============================================\n`);
+        
         instructions.push(
           createTransferInstruction(
             vaultTokenAccount,
@@ -1344,7 +1406,25 @@ export class UserVestingController {
         (sum: number, p: any) => sum + p.amountToClaim,
         0
       );
-      const TOKEN_DECIMALS = 9;
+      
+      // ✅ FIX: Get actual token decimals from pool breakdown (fetch from first pool's vesting)
+      let TOKEN_DECIMALS = 9; // Default fallback
+      if (poolBreakdown && poolBreakdown.length > 0) {
+        try {
+          const { data: firstVesting } = await this.dbService.supabase
+            .from("vestings")
+            .select("vesting_streams(token_mint)")
+            .eq("id", poolBreakdown[0].vestingId)
+            .single();
+          
+          const tokenMintAddress = (firstVesting as any)?.vesting_streams?.token_mint;
+          if (tokenMintAddress) {
+            TOKEN_DECIMALS = await this.getTokenDecimals(new PublicKey(tokenMintAddress));
+          }
+        } catch (err) {
+          console.warn(`[COMPLETE-CLAIM] Failed to get token decimals, using default 9:`, err);
+        }
+      }
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
       // 3. Record Claims in DB
@@ -1502,17 +1582,30 @@ export class UserVestingController {
 
       // Get claim history for this wallet
       const claimHistory = await this.dbService.getClaimHistory(wallet);
-      const TOKEN_DECIMALS = 9;
-      const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
       const now = Math.floor(Date.now() / 1000);
 
-      // Group vestings by token mint
+      // Group vestings by token mint and fetch decimals per token
       const vestingsByToken = new Map<string, any[]>();
+      const decimalsByToken = new Map<string, number>();
+      
       for (const vesting of validVestings) {
         const mint = vesting.vesting_streams.token_mint || "unknown";
         if (!vestingsByToken.has(mint)) {
           vestingsByToken.set(mint, []);
+          
+          // ✅ FIX: Fetch decimals for each unique token mint
+          if (mint !== "unknown") {
+            try {
+              const decimals = await this.getTokenDecimals(new PublicKey(mint));
+              decimalsByToken.set(mint, decimals);
+            } catch (err) {
+              console.warn(`[POOLS] Failed to get decimals for ${mint}, using default 9`);
+              decimalsByToken.set(mint, 9);
+            }
+          } else {
+            decimalsByToken.set(mint, 9);
+          }
         }
         vestingsByToken.get(mint)!.push(vesting);
       }
@@ -1525,6 +1618,10 @@ export class UserVestingController {
       let grandTotalVested = 0;
 
       for (const [tokenMint, tokenVestings] of vestingsByToken.entries()) {
+        // ✅ FIX: Use the correct decimals for this token
+        const TOKEN_DECIMALS = decimalsByToken.get(tokenMint) || 9;
+        const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
+        
         let totalClaimable = 0;
         let totalLocked = 0;
         let totalClaimed = 0;
@@ -1657,11 +1754,16 @@ export class UserVestingController {
         const vestingClaims = claimHistory.filter(
           (claim) => claim.vesting_id === vesting.id
         );
+        
+        // ✅ FIX: Get TOKEN_DIVISOR for this specific mint
+        const mintDecimals = decimalsByToken.get(mint) || 9;
+        const mintDivisor = Math.pow(10, mintDecimals);
+        
         const vestingTotalClaimed =
           vestingClaims.reduce(
             (sum, claim) => sum + Number(claim.amount_claimed),
             0
-          ) / TOKEN_DIVISOR;
+          ) / mintDivisor;
 
         const poolTotal = stream.total_pool_amount;
         const sharePercentage =
@@ -1767,7 +1869,17 @@ export class UserVestingController {
       const claimHistory = await this.dbService.getClaimHistory(userWallet);
       const dbConfig = await this.dbService.getConfig();
       const claimFeeUSD = dbConfig?.claim_fee_usd || 0;
-      const TOKEN_DECIMALS = 9;
+      
+      // ? FIX: Get actual token decimals from the first vesting stream's token mint
+      const tokenMintAddress = validVestings[0]?.vesting_streams?.token_mint;
+      let TOKEN_DECIMALS = 9; // Default fallback
+      if (tokenMintAddress) {
+        try {
+          TOKEN_DECIMALS = await this.getTokenDecimals(new PublicKey(tokenMintAddress));
+        } catch (err) {
+          console.warn(`[CLAIM-ALL-LEGACY] Failed to get decimals for ${tokenMintAddress}, using default 9`);
+        }
+      }
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
       // Calculate available amount per pool
@@ -2076,9 +2188,15 @@ export class UserVestingController {
       }
 
       // Add transfer instructions for each pool
-      // Use precise conversion to avoid floating point errors
-      const amountInBaseUnitsFloat = amountToClaim * 1e9;
+      // ✅ FIX: Use actual token decimals instead of hardcoded 1e9
+      const tokenDecimals = await this.getTokenDecimals(tokenMint);
+      const amountInBaseUnitsFloat = amountToClaim * Math.pow(10, tokenDecimals);
       const amountInBaseUnits = BigInt(Math.round(amountInBaseUnitsFloat));
+      
+      console.log(`[CLAIM-V2] Token: ${tokenMint.toBase58()}`);
+      console.log(`[CLAIM-V2] Decimals: ${tokenDecimals}`);
+      console.log(`[CLAIM-V2] Amount (UI): ${amountToClaim}`);
+      console.log(`[CLAIM-V2] Base Units: ${amountInBaseUnits}`);
 
       tokenTransferTx.add(
         createTransferInstruction(
@@ -2400,7 +2518,17 @@ export class UserVestingController {
       const claimHistory = await this.dbService.getClaimHistory(userWallet);
       const dbConfig = await this.dbService.getConfig();
       const claimFeeUSD = dbConfig?.claim_fee_usd || 0;
-      const TOKEN_DECIMALS = 9;
+      
+      // ? FIX: Get actual token decimals from the first vesting stream's token mint
+      const tokenMintAddress = validVestings[0]?.vesting_streams?.token_mint;
+      let TOKEN_DECIMALS = 9; // Default fallback
+      if (tokenMintAddress) {
+        try {
+          TOKEN_DECIMALS = await this.getTokenDecimals(new PublicKey(tokenMintAddress));
+        } catch (err) {
+          console.warn(`[CLAIM-ALL-V3] Failed to get decimals for ${tokenMintAddress}, using default 9`);
+        }
+      }
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
       // Calculate available amount per pool
@@ -2913,7 +3041,24 @@ export class UserVestingController {
       }
 
       // Record claims in database for each pool that had an amount claimed
-      const TOKEN_DECIMALS = 9;
+      // ? FIX: Get actual token decimals from pool breakdown
+      let TOKEN_DECIMALS = 9; // Default fallback
+      if (poolBreakdown && poolBreakdown.length > 0) {
+        try {
+          const { data: firstVesting } = await this.dbService.supabase
+            .from("vestings")
+            .select("vesting_streams(token_mint)")
+            .eq("id", poolBreakdown[0].vestingId)
+            .single();
+          
+          const tokenMintAddress = (firstVesting as any)?.vesting_streams?.token_mint;
+          if (tokenMintAddress) {
+            TOKEN_DECIMALS = await this.getTokenDecimals(new PublicKey(tokenMintAddress));
+          }
+        } catch (err) {
+          console.warn(`[SUBMIT-CLAIM] Failed to get token decimals, using default 9:`, err);
+        }
+      }
       const totalClaimAmount = poolBreakdown.reduce(
         (sum: number, p: any) => sum + p.amountToClaim,
         0
