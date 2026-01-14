@@ -150,24 +150,50 @@ export async function storeTreasuryKey(
  * const keypair = Keypair.fromSecretKey(secretKey);
  */
 export async function getTreasuryKey(projectId: string): Promise<string> {
-  const client = await getInfisicalClient();
   const config = getInfisicalConfig();
   const secretName = getSecretKeyName(projectId);
 
   try {
-    const secret = await client.secrets().getSecret({
-      projectId: config.projectId,
-      environment: config.environment,
-      secretPath: config.secretPath,
-      secretName: secretName,
-    });
+    // ✅ FIX: Reset client and re-authenticate on 401 errors
+    let client = await getInfisicalClient();
+    
+    try {
+      const secret = await client.secrets().getSecret({
+        projectId: config.projectId,
+        environment: config.environment,
+        secretPath: config.secretPath,
+        secretName: secretName,
+      });
 
-    if (!secret || !secret.secretValue) {
-      throw new Error(`Treasury key not found for project ${projectId}`);
+      if (!secret || !secret.secretValue) {
+        throw new Error(`Treasury key not found for project ${projectId}`);
+      }
+
+      console.log(`✅ Retrieved treasury key for project ${projectId} from Infisical`);
+      return secret.secretValue;
+    } catch (authError: any) {
+      // If 401 error, reset client and retry once
+      if (authError.message?.includes('401') || authError.message?.includes('Token missing')) {
+        console.warn('⚠️ Infisical token expired, re-authenticating...');
+        infisicalClient = null; // Reset singleton
+        client = await getInfisicalClient(); // Re-authenticate
+        
+        const secret = await client.secrets().getSecret({
+          projectId: config.projectId,
+          environment: config.environment,
+          secretPath: config.secretPath,
+          secretName: secretName,
+        });
+
+        if (!secret || !secret.secretValue) {
+          throw new Error(`Treasury key not found for project ${projectId}`);
+        }
+
+        console.log(`✅ Retrieved treasury key for project ${projectId} after re-auth`);
+        return secret.secretValue;
+      }
+      throw authError;
     }
-
-    console.log(`✅ Retrieved treasury key for project ${projectId} from Infisical`);
-    return secret.secretValue;
   } catch (error: any) {
     console.error(`❌ Failed to retrieve treasury key for project ${projectId}:`, error);
     throw new Error(`Failed to retrieve treasury key: ${error.message}`);
