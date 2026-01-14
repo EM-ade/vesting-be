@@ -145,9 +145,17 @@ export async function calculateAvailableBalance(
   let totalBalance = 0;
   try {
     const accountInfo = await getAccount(connection, tokenAccount);
-    totalBalance = Number(accountInfo.amount) / Math.pow(10, 9); // Assuming 9 decimals
+    
+    // ✅ FIX: Get actual token decimals from the mint instead of assuming 9
+    const { getMint } = await import("@solana/spl-token");
+    const mintInfo = await getMint(connection, mintPubkey);
+    const decimals = mintInfo.decimals;
+    
+    totalBalance = Number(accountInfo.amount) / Math.pow(10, decimals);
+    console.log(`[TREASURY] Token ${tokenMint} balance: ${totalBalance} (${decimals} decimals)`);
   } catch (err) {
     // Token account doesn't exist or has 0 balance
+    console.warn(`[TREASURY] Could not fetch balance for ${tokenMint}:`, err);
     totalBalance = 0;
   }
 
