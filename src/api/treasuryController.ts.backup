@@ -931,7 +931,7 @@ export class TreasuryController {
       }
 
       // Fetch metadata for unknown tokens using Helius DAS API
-      const heliusUrl = 'https://mainnet.helius-rpc.com/?api-key=a53cd9fb-465b-4ee6-a217-c33cdd15707d';
+      const heliusUrl = 'https://mainnet.helius-rpc.com/?api-key=63e6acdc-0373-473d-b0ee-d9fca65972dc';
       const tokenMetadata: Record<string, { symbol: string; name: string }> = {};
 
       // Known tokens mapping
