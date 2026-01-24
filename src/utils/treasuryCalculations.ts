@@ -96,6 +96,11 @@ export async function calculateLockedTokens(
 }
 
 /**
+ * Native SOL mint address constant
+ */
+const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
+
+/**
  * Calculate available tokens for withdrawal
  * @param projectId - Project ID
  * @param tokenMint - Token mint address
@@ -133,30 +138,46 @@ export async function calculateAvailableBalance(
   );
 
   // Get actual on-chain balance
-  const { PublicKey } = await import("@solana/web3.js");
-  const { getAssociatedTokenAddress, getAccount } = await import(
-    "@solana/spl-token"
-  );
-
+  const { PublicKey, LAMPORTS_PER_SOL } = await import("@solana/web3.js");
   const vaultPubkey = new PublicKey(project.vault_public_key);
-  const mintPubkey = new PublicKey(tokenMint);
-  const tokenAccount = await getAssociatedTokenAddress(mintPubkey, vaultPubkey);
 
   let totalBalance = 0;
-  try {
-    const accountInfo = await getAccount(connection, tokenAccount);
-    
-    // ✅ FIX: Get actual token decimals from the mint instead of assuming 9
-    const { getMint } = await import("@solana/spl-token");
-    const mintInfo = await getMint(connection, mintPubkey);
-    const decimals = mintInfo.decimals;
-    
-    totalBalance = Number(accountInfo.amount) / Math.pow(10, decimals);
-    console.log(`[TREASURY] Token ${tokenMint} balance: ${totalBalance} (${decimals} decimals)`);
-  } catch (err) {
-    // Token account doesn't exist or has 0 balance
-    console.warn(`[TREASURY] Could not fetch balance for ${tokenMint}:`, err);
-    totalBalance = 0;
+
+  // ✅ FIX: Handle native SOL differently from SPL tokens
+  if (tokenMint === NATIVE_SOL_MINT) {
+    // Native SOL: Use getBalance() directly on the wallet address
+    try {
+      const lamports = await connection.getBalance(vaultPubkey);
+      totalBalance = lamports / LAMPORTS_PER_SOL;
+      console.log(`[TREASURY] Native SOL balance: ${totalBalance} SOL (${lamports} lamports)`);
+    } catch (err) {
+      console.warn(`[TREASURY] Could not fetch SOL balance:`, err);
+      totalBalance = 0;
+    }
+  } else {
+    // SPL Token: Use token account
+    const { getAssociatedTokenAddress, getAccount } = await import(
+      "@solana/spl-token"
+    );
+
+    const mintPubkey = new PublicKey(tokenMint);
+    const tokenAccount = await getAssociatedTokenAddress(mintPubkey, vaultPubkey);
+
+    try {
+      const accountInfo = await getAccount(connection, tokenAccount);
+      
+      // Get actual token decimals from the mint instead of assuming 9
+      const { getMint } = await import("@solana/spl-token");
+      const mintInfo = await getMint(connection, mintPubkey);
+      const decimals = mintInfo.decimals;
+      
+      totalBalance = Number(accountInfo.amount) / Math.pow(10, decimals);
+      console.log(`[TREASURY] Token ${tokenMint} balance: ${totalBalance} (${decimals} decimals)`);
+    } catch (err) {
+      // Token account doesn't exist or has 0 balance
+      console.warn(`[TREASURY] Could not fetch balance for ${tokenMint}:`, err);
+      totalBalance = 0;
+    }
   }
 
   const available = Math.max(0, totalBalance - lockedInPools);
