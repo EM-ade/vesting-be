@@ -34,7 +34,7 @@ const CONFIGS: Record<Network, NetworkConfig> = {
   devnet: {
     backend: {
       rpcNetwork: 'helius-devnet',
-      rpcEndpoint: 'https://devnet.helius-rpc.com/?api-key=a53cd9fb-465b-4ee6-a217-c33cdd15707d',
+      rpcEndpoint: 'https://devnet.helius-rpc.com/?api-key=63e6acdc-0373-473d-b0ee-d9fca65972dc',
     },
     frontend: {
       code: `  // FORCED TO DEVNET FOR TESTING
@@ -52,7 +52,7 @@ const CONFIGS: Record<Network, NetworkConfig> = {
   mainnet: {
     backend: {
       rpcNetwork: 'helius-mainnet',
-      rpcEndpoint: 'https://mainnet.helius-rpc.com/?api-key=a53cd9fb-465b-4ee6-a217-c33cdd15707d',
+      rpcEndpoint: 'https://mainnet.helius-rpc.com/?api-key=63e6acdc-0373-473d-b0ee-d9fca65972dc',
     },
     frontend: {
       code: `  // Auto-detect based on NODE_ENV (set by Vercel)
