@@ -1336,6 +1336,631 @@ export class UserVestingController {
   }
 
   /**
+   * POST /api/user/vesting/claim-v2
+   * SPLIT TRANSACTION FLOW - Step 1: Returns fee-only transaction for user to sign
+   * This eliminates Phantom's "malicious dApp" warning by having only 1 signer per transaction
+   * 
+   * Flow:
+   * 1. User calls /claim-v2 → Gets fee-only transaction (user signs alone)
+   * 2. User signs and sends fee transaction
+   * 3. User calls /execute-claim-v2 with fee signature → Backend verifies and sends tokens
+   */
+  async claimVestingV2(req: Request, res: Response) {
+    try {
+      // Check if claims are globally enabled
+      const dbConfig = await this.dbService.getConfig();
+      if (dbConfig && dbConfig.enable_claims === false) {
+        return res.status(403).json({
+          error: "Claims are currently disabled by the administrator. Please try again later.",
+        });
+      }
+
+      const { userWallet, amountToClaim, tokenMint: requestTokenMint } = req.body;
+
+      if (!userWallet) {
+        return res.status(400).json({ error: "userWallet is required" });
+      }
+
+      console.log(`[CLAIM-V2] Starting claim for wallet: ${userWallet}`);
+
+      // Get all active vesting pools for user
+      const { data: vestings, error: vestingError } = await this.dbService.supabase
+        .from("vestings")
+        .select("*, vesting_streams(*)")
+        .eq("user_wallet", userWallet)
+        .eq("is_active", true)
+        .order("created_at", { ascending: true }); // FIFO order
+
+      if (vestingError) throw vestingError;
+
+      if (!vestings || vestings.length === 0) {
+        return res.status(404).json({ error: "No active vesting found for this wallet" });
+      }
+
+      // Filter valid vestings (exclude paused/cancelled pools)
+      const now = Math.floor(Date.now() / 1000);
+      let validVestings = vestings.filter((v: any) => {
+        if (!v.vesting_streams) return false;
+        if (v.vesting_streams.state === "cancelled" || v.vesting_streams.state === "paused") return false;
+        const startTime = new Date(v.vesting_streams.start_time);
+        return startTime <= new Date();
+      });
+
+      // Filter by token mint if provided
+      if (requestTokenMint) {
+        validVestings = validVestings.filter((v: any) => v.vesting_streams.token_mint === requestTokenMint);
+      }
+
+      if (validVestings.length === 0) {
+        return res.status(400).json({ error: "No valid vesting pools available for claiming" });
+      }
+
+      // Get claim history and calculate available amounts
+      const claimHistory = await this.dbService.getClaimHistory(userWallet);
+      
+      // Get token decimals
+      const tokenMintAddress = validVestings[0]?.vesting_streams?.token_mint;
+      let TOKEN_DECIMALS = 9;
+      if (tokenMintAddress) {
+        try {
+          TOKEN_DECIMALS = await this.getTokenDecimals(new PublicKey(tokenMintAddress));
+        } catch (err) {
+          console.warn(`[CLAIM-V2] Failed to get decimals for ${tokenMintAddress}, using default 9`);
+        }
+      }
+      const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
+
+      // Calculate available amounts per pool
+      const poolsWithAvailable = [];
+      let totalAvailable = 0;
+
+      for (const vesting of validVestings) {
+        const stream = vesting.vesting_streams;
+        const totalAllocation = vesting.token_amount;
+        const startTime = stream.start_time ? Math.floor(new Date(stream.start_time).getTime() / 1000) : now;
+        const vestingDurationSeconds = stream.vesting_duration_seconds || stream.vesting_duration_days * 86400;
+        const cliffDurationSeconds = stream.cliff_duration_seconds || stream.cliff_duration_days * 86400;
+        const endTime = stream.end_time ? Math.floor(new Date(stream.end_time).getTime() / 1000) : now + vestingDurationSeconds;
+        const cliffTime = startTime + cliffDurationSeconds;
+
+        const vestedPercentage = this.calculateVestedPercentage(now, startTime, endTime, cliffTime);
+        const vestedAmount = totalAllocation * vestedPercentage;
+
+        const vestingClaims = claimHistory.filter((claim) => claim.vesting_id === vesting.id);
+        const vestingTotalClaimed = vestingClaims.reduce((sum, claim) => sum + Number(claim.amount_claimed), 0) / TOKEN_DIVISOR;
+
+        const available = Math.max(0, vestedAmount - vestingTotalClaimed);
+        totalAvailable += available;
+
+        if (available > 0) {
+          poolsWithAvailable.push({
+            vesting,
+            stream,
+            available,
+            vestedAmount,
+            totalAllocation,
+            vestingTotalClaimed,
+          });
+        }
+      }
+
+      const roundedTotalAvailable = Math.floor(totalAvailable * 100) / 100;
+      if (roundedTotalAvailable <= 0) {
+        return res.status(400).json({ error: "No tokens available to claim" });
+      }
+
+      const actualClaimAmount = amountToClaim ? Math.min(amountToClaim, roundedTotalAvailable) : roundedTotalAvailable;
+      if (actualClaimAmount <= 0) {
+        return res.status(400).json({ error: "Invalid claim amount" });
+      }
+
+      // Distribute claim amount across pools (FIFO)
+      let remainingToClaim = actualClaimAmount;
+      const poolBreakdown = [];
+
+      for (const poolData of poolsWithAvailable) {
+        if (remainingToClaim <= 0) break;
+        const amountFromThisPool = Math.min(remainingToClaim, poolData.available);
+        remainingToClaim -= amountFromThisPool;
+
+        poolBreakdown.push({
+          poolId: poolData.vesting.vesting_stream_id,
+          poolName: poolData.stream.name,
+          amountToClaim: amountFromThisPool,
+          availableFromPool: poolData.available,
+          vestingId: poolData.vesting.id,
+        });
+      }
+
+      console.log(`[CLAIM-V2] Total available: ${roundedTotalAvailable}, claiming: ${actualClaimAmount}`);
+      console.log(`[CLAIM-V2] Pool breakdown:`, poolBreakdown);
+
+      // Get project context
+      let project = req.project;
+      if (!project && validVestings.length > 0) {
+        const projectId = validVestings[0].project_id || validVestings[0].vesting_streams?.project_id;
+        if (projectId) {
+          const { data: derivedProject } = await this.dbService.supabase
+            .from("projects")
+            .select("*")
+            .eq("id", projectId)
+            .single();
+          if (derivedProject) project = derivedProject;
+        }
+      }
+
+      if (!project) {
+        return res.status(500).json({ error: "Unable to determine project context for claim." });
+      }
+
+      // Calculate fees
+      let globalPlatformFeeLamports = 0;
+      let platformFeeWallet: PublicKey | null = null;
+      let poolProjectFeeLamports = 0;
+      let projectVaultWallet: PublicKey | null = null;
+      let claimFeeUsd = 0;
+
+      // Get global platform fee
+      try {
+        const globalConfig = await this.dbService.getConfig();
+        if (globalConfig?.fee_wallet) {
+          platformFeeWallet = new PublicKey(globalConfig.fee_wallet);
+        }
+        if (globalConfig?.claim_fee_usd !== undefined) {
+          claimFeeUsd = Number(globalConfig.claim_fee_usd);
+          const { solAmount } = await this.priceService.calculateSolFee(claimFeeUsd);
+          globalPlatformFeeLamports = Math.floor(solAmount * LAMPORTS_PER_SOL);
+        } else if (globalConfig?.claim_fee_sol !== undefined) {
+          globalPlatformFeeLamports = Math.floor(Number(globalConfig.claim_fee_sol) * LAMPORTS_PER_SOL);
+        }
+      } catch (err) {
+        console.warn("[CLAIM-V2] Failed to get global platform fee:", err);
+      }
+
+      // Fallback to config
+      if (globalPlatformFeeLamports === 0 && config.claimFeeUSD) {
+        claimFeeUsd = config.claimFeeUSD;
+        const { solAmount } = await this.priceService.calculateSolFee(claimFeeUsd);
+        globalPlatformFeeLamports = Math.floor(solAmount * LAMPORTS_PER_SOL);
+      } else if (globalPlatformFeeLamports === 0 && config.claimFeeSOL) {
+        globalPlatformFeeLamports = Math.floor(config.claimFeeSOL * LAMPORTS_PER_SOL);
+      }
+
+      // Get pool project fee
+      if (validVestings[0]?.vesting_streams?.claim_fee_lamports) {
+        poolProjectFeeLamports = Number(validVestings[0].vesting_streams.claim_fee_lamports);
+        if (project.vault_public_key) {
+          projectVaultWallet = new PublicKey(project.vault_public_key);
+        } else if (project.fee_recipient_address) {
+          projectVaultWallet = new PublicKey(project.fee_recipient_address);
+        }
+      }
+
+      const totalFeeLamports = globalPlatformFeeLamports + poolProjectFeeLamports;
+      const feeInSol = totalFeeLamports / LAMPORTS_PER_SOL;
+
+      console.log(`[CLAIM-V2] Fee breakdown:`);
+      console.log(`  - Platform fee: ${globalPlatformFeeLamports} lamports -> ${platformFeeWallet?.toBase58() || "N/A"}`);
+      console.log(`  - Project fee: ${poolProjectFeeLamports} lamports -> ${projectVaultWallet?.toBase58() || "N/A"}`);
+      console.log(`  - Total: ${totalFeeLamports} lamports (${feeInSol} SOL)`);
+
+      const userPublicKey = new PublicKey(userWallet);
+
+      // ===== BUILD FEE-ONLY TRANSACTION (Single signer: User) =====
+      const feeInstructions = [];
+
+      // Platform fee transfer
+      if (globalPlatformFeeLamports > 0 && platformFeeWallet) {
+        feeInstructions.push(
+          SystemProgram.transfer({
+            fromPubkey: userPublicKey,
+            toPubkey: platformFeeWallet,
+            lamports: globalPlatformFeeLamports,
+          })
+        );
+      }
+
+      // Project fee transfer
+      if (poolProjectFeeLamports > 0 && projectVaultWallet) {
+        feeInstructions.push(
+          SystemProgram.transfer({
+            fromPubkey: userPublicKey,
+            toPubkey: projectVaultWallet,
+            lamports: poolProjectFeeLamports,
+          })
+        );
+      }
+
+      // If no fees, we still need at least one instruction - add a memo or skip fee tx
+      if (feeInstructions.length === 0) {
+        console.log("[CLAIM-V2] No fees configured, skipping fee transaction");
+        // Generate a claim token for direct execution
+        const claimToken = Buffer.from(
+          JSON.stringify({
+            userWallet,
+            amountToClaim: actualClaimAmount,
+            poolBreakdown,
+            projectId: project.id,
+            tokenMint: tokenMintAddress,
+            timestamp: Date.now(),
+            noFee: true,
+          })
+        ).toString("base64");
+
+        return res.json({
+          success: true,
+          step: "execute_directly",
+          claimToken,
+          claimDetails: {
+            amountToClaim: actualClaimAmount,
+            totalAvailable: roundedTotalAvailable,
+            poolBreakdown,
+          },
+          feeDetails: {
+            amountSol: 0,
+            amountLamports: 0,
+            platformFeeLamports: 0,
+            projectFeeLamports: 0,
+          },
+        });
+      }
+
+      // Get blockhash
+      const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash("confirmed");
+
+      // Build fee transaction (user is sole signer)
+      const feeMessageV0 = new TransactionMessage({
+        payerKey: userPublicKey,
+        recentBlockhash: blockhash,
+        instructions: feeInstructions,
+      }).compileToV0Message();
+
+      const feeTransaction = new VersionedTransaction(feeMessageV0);
+      // NO partial signing - user is the only signer!
+
+      const serializedFeeTransaction = Buffer.from(feeTransaction.serialize()).toString("base64");
+
+      // Generate a secure claim token that includes all claim details
+      // This will be passed to /execute-claim-v2 after fee is paid
+      const claimToken = Buffer.from(
+        JSON.stringify({
+          userWallet,
+          amountToClaim: actualClaimAmount,
+          poolBreakdown,
+          projectId: project.id,
+          tokenMint: tokenMintAddress,
+          tokenDecimals: TOKEN_DECIMALS,
+          timestamp: Date.now(),
+          platformFeeLamports: globalPlatformFeeLamports,
+          projectFeeLamports: poolProjectFeeLamports,
+          platformFeeWallet: platformFeeWallet?.toBase58(),
+          projectFeeWallet: projectVaultWallet?.toBase58(),
+        })
+      ).toString("base64");
+
+      console.log(`[CLAIM-V2] ✓ Fee transaction built successfully (user-only signer)`);
+      console.log(`[CLAIM-V2] Transaction size: ${serializedFeeTransaction.length} bytes (base64)`);
+
+      res.json({
+        success: true,
+        step: "sign_fee",
+        feeTransaction: serializedFeeTransaction,
+        claimToken,
+        lastValidBlockHeight,
+        claimDetails: {
+          amountToClaim: actualClaimAmount,
+          totalAvailable: roundedTotalAvailable,
+          poolBreakdown,
+        },
+        feeDetails: {
+          amountSol: feeInSol,
+          amountLamports: totalFeeLamports,
+          platformFeeLamports: globalPlatformFeeLamports,
+          projectFeeLamports: poolProjectFeeLamports,
+          platformFeeWallet: platformFeeWallet?.toBase58(),
+          projectFeeWallet: projectVaultWallet?.toBase58(),
+        },
+      });
+    } catch (error) {
+      console.error("[CLAIM-V2] Error:", error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  /**
+   * POST /api/user/vesting/execute-claim-v2
+   * SPLIT TRANSACTION FLOW - Step 2: Verify fee payment and execute token transfer
+   * Backend builds and sends the token transfer transaction (vault is sole signer)
+   * 
+   * Body: { feeSignature: string, claimToken: string }
+   */
+  async executeClaimV2(req: Request, res: Response) {
+    try {
+      const { feeSignature, claimToken } = req.body;
+
+      if (!claimToken) {
+        return res.status(400).json({ error: "claimToken is required" });
+      }
+
+      // Decode claim token
+      let claimData: any;
+      try {
+        claimData = JSON.parse(Buffer.from(claimToken, "base64").toString());
+      } catch (err) {
+        return res.status(400).json({ error: "Invalid claimToken" });
+      }
+
+      const {
+        userWallet,
+        amountToClaim,
+        poolBreakdown,
+        projectId,
+        tokenMint,
+        tokenDecimals,
+        timestamp,
+        platformFeeLamports,
+        projectFeeLamports,
+        platformFeeWallet,
+        projectFeeWallet,
+        noFee,
+      } = claimData;
+
+      console.log(`[EXECUTE-CLAIM-V2] Processing claim for wallet: ${userWallet}`);
+      console.log(`[EXECUTE-CLAIM-V2] Amount: ${amountToClaim}, Token: ${tokenMint}`);
+
+      // Check if claim token is not expired (5 minutes)
+      if (Date.now() - timestamp > 5 * 60 * 1000) {
+        return res.status(400).json({ error: "Claim token expired. Please initiate a new claim." });
+      }
+
+      // Verify fee payment on-chain (unless no fee)
+      if (!noFee && feeSignature) {
+        console.log(`[EXECUTE-CLAIM-V2] Verifying fee payment: ${feeSignature}`);
+        
+        // Wait for confirmation with retries
+        let verified = false;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          try {
+            const status = await this.connection.getSignatureStatus(feeSignature);
+            
+            if (status?.value?.err) {
+              return res.status(400).json({
+                error: "Fee payment transaction failed on-chain",
+                details: status.value.err,
+              });
+            }
+            
+            if (status?.value?.confirmationStatus === "confirmed" || status?.value?.confirmationStatus === "finalized") {
+              verified = true;
+              console.log(`[EXECUTE-CLAIM-V2] ✓ Fee payment verified (${status.value.confirmationStatus})`);
+              break;
+            }
+            
+            // Wait and retry
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          } catch (err) {
+            console.warn(`[EXECUTE-CLAIM-V2] Fee verification attempt ${attempt + 1} failed:`, err);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+        
+        if (!verified) {
+          return res.status(400).json({
+            error: "Could not verify fee payment. Please wait for confirmation and try again.",
+          });
+        }
+      } else if (!noFee && !feeSignature) {
+        return res.status(400).json({ error: "feeSignature is required when fees are configured" });
+      }
+
+      // Get vault keypair
+      let vaultKeypair: Keypair;
+      try {
+        vaultKeypair = await getVaultKeypairForProject(projectId);
+      } catch (err) {
+        console.error("[EXECUTE-CLAIM-V2] Failed to get vault keypair:", err);
+        return res.status(500).json({ error: "Failed to access project vault" });
+      }
+
+      const userPublicKey = new PublicKey(userWallet);
+      const projectTokenMint = new PublicKey(tokenMint);
+      const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
+      const isNativeSOL = tokenMint === NATIVE_SOL_MINT;
+
+      // ===== BUILD TOKEN TRANSFER TRANSACTION (Single signer: Vault) =====
+      const transferInstructions = [];
+
+      if (isNativeSOL) {
+        // Native SOL transfer
+        const amountInLamports = this.toBaseUnits(amountToClaim, 9);
+        console.log(`[EXECUTE-CLAIM-V2] Native SOL transfer: ${amountToClaim} SOL (${amountInLamports} lamports)`);
+        
+        transferInstructions.push(
+          SystemProgram.transfer({
+            fromPubkey: vaultKeypair.publicKey,
+            toPubkey: userPublicKey,
+            lamports: Number(amountInLamports),
+          })
+        );
+      } else {
+        // SPL Token transfer
+        const mintInfo = await this.connection.getAccountInfo(projectTokenMint);
+        if (!mintInfo) {
+          throw new Error("Token mint not found");
+        }
+        const tokenProgramId = mintInfo.owner;
+
+        const vaultTokenAccount = await getAssociatedTokenAddress(
+          projectTokenMint,
+          vaultKeypair.publicKey,
+          false,
+          tokenProgramId
+        );
+        const userTokenAccount = await getAssociatedTokenAddress(
+          projectTokenMint,
+          userPublicKey,
+          false,
+          tokenProgramId
+        );
+
+        // Check if user ATA exists
+        let userTokenAccountExists = false;
+        try {
+          await getAccount(this.connection, userTokenAccount, undefined, tokenProgramId);
+          userTokenAccountExists = true;
+        } catch (err) {
+          // Does not exist
+        }
+
+        // Create ATA if needed (vault pays rent since it's the signer)
+        if (!userTokenAccountExists) {
+          transferInstructions.push(
+            createAssociatedTokenAccountInstruction(
+              vaultKeypair.publicKey, // Payer (Vault)
+              userTokenAccount,
+              userPublicKey, // Owner
+              projectTokenMint,
+              tokenProgramId
+            )
+          );
+        }
+
+        // Token transfer
+        const actualDecimals = tokenDecimals || await this.getTokenDecimals(projectTokenMint);
+        const amountInBaseUnits = this.toBaseUnits(amountToClaim, actualDecimals);
+        
+        console.log(`[EXECUTE-CLAIM-V2] SPL Token transfer: ${amountToClaim} tokens (${amountInBaseUnits} base units)`);
+
+        transferInstructions.push(
+          createTransferInstruction(
+            vaultTokenAccount,
+            userTokenAccount,
+            vaultKeypair.publicKey,
+            amountInBaseUnits,
+            [],
+            tokenProgramId
+          )
+        );
+      }
+
+      // Build and send transaction
+      const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash("confirmed");
+
+      const transferMessageV0 = new TransactionMessage({
+        payerKey: vaultKeypair.publicKey, // Vault pays gas for token transfer
+        recentBlockhash: blockhash,
+        instructions: transferInstructions,
+      }).compileToV0Message();
+
+      const transferTransaction = new VersionedTransaction(transferMessageV0);
+      transferTransaction.sign([vaultKeypair]); // Vault is the only signer
+
+      // Send transaction
+      console.log("[EXECUTE-CLAIM-V2] Sending token transfer transaction...");
+      
+      let tokenSignature: string | null = null;
+      const maxRetries = 3;
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          tokenSignature = await this.connection.sendRawTransaction(
+            transferTransaction.serialize(),
+            { skipPreflight: false, maxRetries: 2 }
+          );
+          
+          console.log(`[EXECUTE-CLAIM-V2] Transaction sent: ${tokenSignature}`);
+
+          // Wait for confirmation
+          await this.connection.confirmTransaction(
+            {
+              signature: tokenSignature,
+              blockhash,
+              lastValidBlockHeight,
+            },
+            "confirmed"
+          );
+
+          console.log(`[EXECUTE-CLAIM-V2] ✓ Token transfer confirmed: ${tokenSignature}`);
+          break;
+        } catch (err) {
+          console.error(`[EXECUTE-CLAIM-V2] Attempt ${attempt} failed:`, err);
+          if (attempt === maxRetries) {
+            throw err;
+          }
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+
+      if (!tokenSignature) {
+        throw new Error("Failed to send token transfer transaction");
+      }
+
+      // Record claims in database
+      const totalFeeLamports = (platformFeeLamports || 0) + (projectFeeLamports || 0);
+      const feeInSol = totalFeeLamports / LAMPORTS_PER_SOL;
+      const totalClaimAmount = poolBreakdown.reduce((sum: number, p: any) => sum + p.amountToClaim, 0);
+
+      for (const poolItem of poolBreakdown) {
+        if (poolItem.amountToClaim > 0) {
+          const amountInBaseUnits = Number(this.toBaseUnits(poolItem.amountToClaim, tokenDecimals || 9));
+          if (amountInBaseUnits === 0) continue;
+
+          const proportionalFee = (poolItem.amountToClaim / totalClaimAmount) * feeInSol;
+
+          await this.dbService.createClaim({
+            user_wallet: userWallet,
+            vesting_id: poolItem.vestingId,
+            project_id: projectId,
+            amount_claimed: amountInBaseUnits,
+            fee_paid: proportionalFee,
+            transaction_signature: tokenSignature,
+          });
+
+          // Log activity
+          try {
+            await this.dbService.logAdminAction({
+              action: "CLAIM_COMPLETED",
+              admin_wallet: "SYSTEM",
+              target_wallet: userWallet,
+              details: {
+                pool_id: poolItem.poolId,
+                pool_name: poolItem.poolName,
+                amount: poolItem.amountToClaim,
+                feeSignature: feeSignature || "no-fee",
+                tokenSignature,
+                project_id: projectId,
+                flow: "split-v2",
+              },
+            });
+          } catch (logErr) {
+            console.warn("[EXECUTE-CLAIM-V2] Failed to log activity:", logErr);
+          }
+
+          console.log(`[EXECUTE-CLAIM-V2] Recorded claim for pool ${poolItem.poolName}: ${poolItem.amountToClaim} tokens`);
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          totalAmountClaimed: amountToClaim,
+          poolBreakdown,
+          feeTransactionSignature: feeSignature || null,
+          tokenTransactionSignature: tokenSignature,
+          feePaid: feeInSol,
+        },
+      });
+    } catch (error) {
+      console.error("[EXECUTE-CLAIM-V2] Error:", error);
+      res.status(500).json({
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  /**
    * POST /api/user/vesting/complete-claim
    * Record claim after user has signed and sent the transaction
    * Body: { userWallet: string, signature: string, poolBreakdown: Array }
