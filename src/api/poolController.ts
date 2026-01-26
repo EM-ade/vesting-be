@@ -202,18 +202,15 @@ export class PoolController {
 
           console.log(`[VALIDATION] Native SOL balance (fresh with 'confirmed' commitment): ${solBalanceInSOL} SOL`);
 
-          // For native SOL pools, align with streamflowService.ts calculation:
-          // Required = (pool * 1.005) + 0.02
-          // This matches streamflowService.ts line 77
-          const poolWithStreamflowFee = calculateRequiredWithFee(params.total_pool_amount); // pool * 1.005
-          const wrapAndRentFees = 0.02; // Must match streamflowService.ts
-          const requiredSOL = poolWithStreamflowFee + wrapAndRentFees;
+          // DATABASE-ONLY MODE: No Streamflow fees needed
+          // Just need the pool amount itself (no wrap/rent fees since we're not deploying to Streamflow)
+          const requiredSOL = params.total_pool_amount;
 
           result.checks.tokenBalance.required = requiredSOL;
 
           if (floatLessThan(solBalanceInSOL, requiredSOL, EPSILON)) {
             result.checks.tokenBalance.valid = false;
-            result.checks.tokenBalance.message = `Insufficient SOL in treasury. Required: ${formatTokenAmount(requiredSOL, 4)} SOL (${params.total_pool_amount} pool + 0.5% Streamflow fee + 0.02 wrap/rent fees), Available: ${formatTokenAmount(solBalanceInSOL, 4)} SOL. The UI will prompt you to fund the treasury.`;
+            result.checks.tokenBalance.message = `Insufficient SOL in treasury. Required: ${formatTokenAmount(requiredSOL, 4)} SOL, Available: ${formatTokenAmount(solBalanceInSOL, 4)} SOL. The UI will prompt you to fund the treasury.`;
             result.warnings.push(result.checks.tokenBalance.message);
             // DON'T set result.valid = false - this is a warning, not an error
           } else {
@@ -238,14 +235,16 @@ export class PoolController {
 
             console.log(`[VALIDATION] Token balance found: ${tokenBalance}`);
 
-            const requiredTokens = calculateRequiredWithFee(params.total_pool_amount);
+            // DATABASE-ONLY MODE: No Streamflow fees needed
+            // Just need the pool amount itself
+            const requiredTokens = params.total_pool_amount;
             result.checks.tokenBalance.required = requiredTokens;
 
             if (floatLessThan(tokenBalance, requiredTokens, EPSILON)) {
               result.checks.tokenBalance.valid = false;
-              result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${formatTokenAmount(requiredTokens, 2)} (pool + 0.5% Streamflow fee), Available: ${formatTokenAmount(tokenBalance, 2)}. You can fund the treasury first, or create pool without Streamflow deployment.`;
+              result.checks.tokenBalance.message = `Insufficient tokens in treasury. Required: ${formatTokenAmount(requiredTokens, 2)}, Available: ${formatTokenAmount(tokenBalance, 2)}. Please fund the treasury first.`;
               result.warnings.push(result.checks.tokenBalance.message);
-              // Don't set result.valid = false here - allow proceeding without Streamflow
+              // Don't set result.valid = false here - allow proceeding
             } else {
               result.checks.tokenBalance.message = `Token balance sufficient: ${formatTokenAmount(tokenBalance, 2)}`;
             }

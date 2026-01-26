@@ -143,9 +143,16 @@ export async function calculateAvailableBalance(
 
   let totalBalance = 0;
 
+  // Normalize token mint for comparison (handle both string and PublicKey)
+  const tokenMintStr = typeof tokenMint === 'string' ? tokenMint : (tokenMint as any).toString();
+  const isNativeSOL = tokenMintStr === NATIVE_SOL_MINT;
+
+  console.log(`[TREASURY] calculateAvailableBalance called with tokenMint: "${tokenMintStr}", isNativeSOL: ${isNativeSOL}`);
+
   // ✅ FIX: Handle native SOL differently from SPL tokens
-  if (tokenMint === NATIVE_SOL_MINT) {
+  if (isNativeSOL) {
     // Native SOL: Use getBalance() directly on the wallet address
+    // Native SOL doesn't have a token account - balance is stored as lamports in the wallet
     try {
       const lamports = await connection.getBalance(vaultPubkey);
       totalBalance = lamports / LAMPORTS_PER_SOL;
@@ -173,18 +180,40 @@ export async function calculateAvailableBalance(
       
       totalBalance = Number(accountInfo.amount) / Math.pow(10, decimals);
       console.log(`[TREASURY] Token ${tokenMint} balance: ${totalBalance} (${decimals} decimals)`);
-    } catch (err) {
-      // Token account doesn't exist or has 0 balance
-      console.warn(`[TREASURY] Could not fetch balance for ${tokenMint}:`, err);
+    } catch (err: any) {
+      // Token account doesn't exist or has 0 balance - this is expected for unfunded accounts
+      // Check for TokenAccountNotFoundError by name or message content
+      const isTokenAccountNotFound = 
+        err?.name === 'TokenAccountNotFoundError' || 
+        err?.constructor?.name === 'TokenAccountNotFoundError' ||
+        err?.message?.includes('could not find account') ||
+        err?.message?.includes('TokenAccountNotFoundError');
+      
+      if (isTokenAccountNotFound) {
+        console.log(`[TREASURY] Token account not found for ${tokenMint} - balance is 0 (this is normal for unfunded accounts)`);
+      } else {
+        console.warn(`[TREASURY] Could not fetch balance for ${tokenMint}:`, err);
+      }
       totalBalance = 0;
     }
   }
 
-  const available = Math.max(0, totalBalance - lockedInPools);
+  // Calculate available with floating-point precision handling
+  const rawAvailable = totalBalance - lockedInPools;
+  
+  // Use epsilon tolerance for floating-point comparison (1e-9 = 0.000000001)
+  // This handles cases like 0.0009999999999763531 which should be 0.001
+  const EPSILON = 1e-9;
+  
+  // Round to 9 decimal places to avoid floating-point precision issues
+  // SOL has 9 decimal places (lamports), so this is the maximum precision we need
+  const available = Math.max(0, Math.round(rawAvailable * 1e9) / 1e9);
+  
+  console.log(`[TREASURY] Available calculation: totalBalance=${totalBalance}, lockedInPools=${lockedInPools}, rawAvailable=${rawAvailable}, rounded=${available}`);
 
   return {
-    totalBalance,
-    lockedInPools,
+    totalBalance: Math.round(totalBalance * 1e9) / 1e9,
+    lockedInPools: Math.round(lockedInPools * 1e9) / 1e9,
     available,
     vaultAddress: project.vault_public_key,
   };

@@ -189,48 +189,77 @@ export class TreasuryController {
         ]);
       };
 
-      // Get treasury token balance
-      const treasuryTokenAccount = await getAssociatedTokenAddress(
-        tokenMint,
-        treasuryPublicKey
-      );
+      // Check if the project's token is native SOL
+      const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
+      const isProjectTokenNativeSOL = tokenMint.toBase58() === NATIVE_SOL_MINT;
 
       let treasuryBalance = 0;
       let solBalance = 0;
       const TOKEN_DECIMALS = 9;
       const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
 
-      // Parallelize RPC calls with timeout protection
-      const [tokenAccountResult, solBalanceResult, tokenAccountsResult] = await Promise.allSettled([
-        // Token balance
-        withTimeout(
-          getAccount(this.connection, treasuryTokenAccount),
-          RPC_TIMEOUT_MS
-        ).catch(() => null),
-        
-        // SOL balance
+      // Build the list of promises based on whether we need SPL token balance
+      const rpcPromises: Promise<any>[] = [];
+      
+      // Always fetch SOL balance
+      rpcPromises.push(
         withTimeout(
           this.connection.getBalance(treasuryPublicKey),
           RPC_TIMEOUT_MS
-        ).catch(() => 0),
-        
-        // All token accounts (most expensive call)
+        ).catch(() => 0)
+      );
+      
+      // Always fetch all token accounts (for listing all tokens in treasury)
+      rpcPromises.push(
         withTimeout(
           this.connection.getParsedTokenAccountsByOwner(treasuryPublicKey, {
             programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
           }),
           RPC_TIMEOUT_MS
-        ).catch(() => null),
-      ]);
+        ).catch(() => null)
+      );
 
-      // Process token balance result
-      if (tokenAccountResult.status === 'fulfilled' && tokenAccountResult.value) {
-        treasuryBalance = Number(tokenAccountResult.value.amount) / TOKEN_DIVISOR;
+      // Only fetch SPL token account if the project token is NOT native SOL
+      // Native SOL doesn't have a token account - it's stored directly in wallet lamports
+      if (!isProjectTokenNativeSOL) {
+        const treasuryTokenAccount = await getAssociatedTokenAddress(
+          tokenMint,
+          treasuryPublicKey
+        );
+        rpcPromises.push(
+          withTimeout(
+            getAccount(this.connection, treasuryTokenAccount),
+            RPC_TIMEOUT_MS
+          ).catch((err) => {
+            // Only log if it's not a normal "account not found" error
+            if (err?.name !== 'TokenAccountNotFoundError' && !err?.message?.includes('could not find account')) {
+              console.warn(`[TREASURY] Could not fetch token account:`, err);
+            } else {
+              console.log(`[TREASURY] Token account not found for ${tokenMint.toBase58()} - balance is 0 (this is normal for unfunded accounts)`);
+            }
+            return null;
+          })
+        );
       }
+
+      // Execute all RPC calls in parallel
+      const results = await Promise.allSettled(rpcPromises);
+      const solBalanceResult = results[0];
+      const tokenAccountsResult = results[1];
+      const tokenAccountResult = !isProjectTokenNativeSOL ? results[2] : null;
 
       // Process SOL balance result
       if (solBalanceResult.status === 'fulfilled') {
-        solBalance = solBalanceResult.value / 1e9;
+        solBalance = (solBalanceResult.value as number) / 1e9;
+      }
+
+      // Process token balance result (only for SPL tokens)
+      if (!isProjectTokenNativeSOL && tokenAccountResult?.status === 'fulfilled' && tokenAccountResult.value) {
+        treasuryBalance = Number((tokenAccountResult.value as any).amount) / TOKEN_DIVISOR;
+      } else if (isProjectTokenNativeSOL) {
+        // For native SOL, the treasury balance IS the SOL balance
+        treasuryBalance = solBalance;
+        console.log(`[TREASURY] Native SOL project - treasury balance: ${treasuryBalance} SOL`);
       }
 
       // Get locked amounts per token from allocations (calculated below)
@@ -399,9 +428,12 @@ export class TreasuryController {
       });
 
       // Now add tokens with AVAILABLE balance (total - locked)
+      // Use rounding to avoid floating-point precision issues (e.g., 0.0009999999999763531 instead of 0.001)
+      const roundToDecimals = (value: number, decimals: number = 9) => Math.round(value * Math.pow(10, decimals)) / Math.pow(10, decimals);
+      
       const solMint = "So11111111111111111111111111111111111111112";
       const solLocked = lockedPerToken[solMint] || 0;
-      const solAvailable = Math.max(0, solBalance - solLocked);
+      const solAvailable = Math.max(0, roundToDecimals(solBalance - solLocked));
       
       tokens.push({
         symbol: "SOL",
@@ -412,10 +444,10 @@ export class TreasuryController {
       // Add SPL tokens with available balances
       if (tokenAccountsResult.status === 'fulfilled' && tokenAccountsResult.value) {
         try {
-          const tokenAccounts = tokenAccountsResult.value;
+          const tokenAccounts = tokenAccountsResult.value as any;
 
           const spl_tokens = tokenAccounts.value
-            .map((accountInfo) => {
+            .map((accountInfo: any) => {
               const parsedInfo = accountInfo.account.data.parsed.info;
               const mintAddress = parsedInfo.mint;
               const totalAmount = parsedInfo.tokenAmount.uiAmount;
@@ -426,8 +458,9 @@ export class TreasuryController {
               }
 
               // Calculate available balance for this token
+              // Use rounding to avoid floating-point precision issues
               const locked = lockedPerToken[mintAddress] || 0;
-              const available = Math.max(0, totalAmount - locked);
+              const available = Math.max(0, roundToDecimals(totalAmount - locked));
 
               // ✅ FIX: Will fetch dynamic symbols after this map
               return {
@@ -436,7 +469,7 @@ export class TreasuryController {
                 mint: mintAddress,
               };
             })
-            .filter((t): t is { symbol: string; balance: number; mint: string } => t !== null && t.balance > 0);
+            .filter((t: any): t is { symbol: string; balance: number; mint: string } => t !== null && t.balance > 0);
 
           tokens = [...tokens, ...spl_tokens];
         } catch (err) {
@@ -872,10 +905,13 @@ export class TreasuryController {
       }
 
       // Get SOL balance
+      // Use rounding to avoid floating-point precision issues
+      const roundToDecimals = (value: number, decimals: number = 9) => Math.round(value * Math.pow(10, decimals)) / Math.pow(10, decimals);
+      
       const solBalance = await connection.getBalance(treasuryPublicKey);
       const solBalanceInSOL = solBalance / LAMPORTS_PER_SOL;
       const solLocked = lockedAmounts["So11111111111111111111111111111111111111112"] || 0;
-      const solAvailable = Math.max(0, solBalanceInSOL - solLocked);
+      const solAvailable = Math.max(0, roundToDecimals(solBalanceInSOL - solLocked));
 
       // Get all token accounts
       const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
@@ -915,7 +951,8 @@ export class TreasuryController {
         const totalAmount = parsedInfo.tokenAmount.uiAmount || 0;
         const decimals = parsedInfo.tokenAmount.decimals;
         const locked = lockedAmounts[mint] || 0;
-        const available = Math.max(0, totalAmount - locked);
+        // Use rounding to avoid floating-point precision issues
+        const available = Math.max(0, roundToDecimals(totalAmount - locked, decimals));
 
         // Only include tokens with available balance
         if (available > 0 || totalAmount > 0) {
