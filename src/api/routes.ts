@@ -178,6 +178,22 @@ router.post(
   userVestingController.completeClaimWithFee.bind(userVestingController)
 );
 
+// V2 Split Transaction Claim Routes (eliminates Phantom "malicious dApp" warning)
+// Step 1: Get fee-only transaction (user is sole signer)
+router.post(
+  "/user/vesting/claim-v2",
+  claimRateLimiter,
+  deduplicationMiddleware,
+  validate(schemas.claimVesting),
+  userVestingController.claimVestingV2.bind(userVestingController)
+);
+// Step 2: Verify fee payment and execute token transfer (backend sends)
+router.post(
+  "/user/vesting/execute-claim-v2",
+  claimRateLimiter,
+  userVestingController.executeClaimV2.bind(userVestingController)
+);
+
 // Admin logs routes
 router.get(
   "/admin-logs",
