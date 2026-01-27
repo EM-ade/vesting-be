@@ -1105,14 +1105,11 @@ export class UserVestingController {
         );
       } else {
         // For SPL tokens: Use token accounts
-        const mintInfo = await this.connection.getAccountInfo(projectTokenMint);
-        if (!mintInfo) {
-          throw new Error("Token mint not found");
-        }
-        const tokenProgramId = mintInfo.owner;
-        console.log(
-          `[CLAIM] SPL Token Program ID: ${tokenProgramId.toBase58()}`
-        );
+        // ✅ FIX: Properly detect token program (Token vs Token-2022)
+        const { detectTokenProgram } = await import("../utils/tokenProgramDetection");
+        const tokenProgramId = await detectTokenProgram(this.connection, projectTokenMint);
+        
+        console.log(`[CLAIM] Using token program: ${tokenProgramId.toBase58()}`);
 
         const vaultTokenAccount = await getAssociatedTokenAddress(
           projectTokenMint,
@@ -1127,6 +1124,18 @@ export class UserVestingController {
           tokenProgramId
         );
 
+        console.log(`[CLAIM] Vault token account: ${vaultTokenAccount.toBase58()}`);
+        console.log(`[CLAIM] User token account: ${userTokenAccount.toBase58()}`);
+
+        // ✅ FIX: Verify vault token account exists before attempting transfer
+        try {
+          await getAccount(this.connection, vaultTokenAccount, undefined, tokenProgramId);
+          console.log(`[CLAIM] ✓ Vault token account exists`);
+        } catch (err) {
+          console.error(`[CLAIM] ✗ Vault token account does not exist:`, err);
+          throw new Error(`Vault token account does not exist. Please ensure the treasury is funded with tokens.`);
+        }
+
         // Check if User ATA exists
         let userTokenAccountExists = false;
         try {
@@ -1137,8 +1146,9 @@ export class UserVestingController {
             tokenProgramId
           );
           userTokenAccountExists = true;
+          console.log(`[CLAIM] ✓ User token account already exists`);
         } catch (err) {
-          // Does not exist
+          console.log(`[CLAIM] User token account does not exist, will create it`);
         }
 
         // Create ATA (if needed) - User pays rent
@@ -1786,11 +1796,11 @@ export class UserVestingController {
         );
       } else {
         // SPL Token transfer
-        const mintInfo = await this.connection.getAccountInfo(projectTokenMint);
-        if (!mintInfo) {
-          throw new Error("Token mint not found");
-        }
-        const tokenProgramId = mintInfo.owner;
+        // ✅ FIX: Properly detect token program (Token vs Token-2022)
+        const { detectTokenProgram } = await import("../utils/tokenProgramDetection");
+        const tokenProgramId = await detectTokenProgram(this.connection, projectTokenMint);
+        
+        console.log(`[EXECUTE-CLAIM-V2] Using token program: ${tokenProgramId.toBase58()}`);
 
         const vaultTokenAccount = await getAssociatedTokenAddress(
           projectTokenMint,
@@ -1805,13 +1815,28 @@ export class UserVestingController {
           tokenProgramId
         );
 
+        console.log(`[EXECUTE-CLAIM-V2] Vault token account: ${vaultTokenAccount.toBase58()}`);
+        console.log(`[EXECUTE-CLAIM-V2] User token account: ${userTokenAccount.toBase58()}`);
+
+        // ✅ FIX: Verify vault token account exists before attempting transfer
+        let vaultTokenAccountExists = false;
+        try {
+          await getAccount(this.connection, vaultTokenAccount, undefined, tokenProgramId);
+          vaultTokenAccountExists = true;
+          console.log(`[EXECUTE-CLAIM-V2] ✓ Vault token account exists`);
+        } catch (err) {
+          console.error(`[EXECUTE-CLAIM-V2] ✗ Vault token account does not exist:`, err);
+          throw new Error(`Vault token account does not exist. Please ensure the treasury is funded with tokens.`);
+        }
+
         // Check if user ATA exists
         let userTokenAccountExists = false;
         try {
           await getAccount(this.connection, userTokenAccount, undefined, tokenProgramId);
           userTokenAccountExists = true;
+          console.log(`[EXECUTE-CLAIM-V2] ✓ User token account already exists`);
         } catch (err) {
-          // Does not exist
+          console.log(`[EXECUTE-CLAIM-V2] User token account does not exist, will create it`);
         }
 
         // Create ATA if needed (vault pays rent since it's the signer)
@@ -1825,13 +1850,14 @@ export class UserVestingController {
               tokenProgramId
             )
           );
+          console.log(`[EXECUTE-CLAIM-V2] Added instruction to create user token account`);
         }
 
         // Token transfer
         const actualDecimals = tokenDecimals || await this.getTokenDecimals(projectTokenMint);
         const amountInBaseUnits = this.toBaseUnits(amountToClaim, actualDecimals);
         
-        console.log(`[EXECUTE-CLAIM-V2] SPL Token transfer: ${amountToClaim} tokens (${amountInBaseUnits} base units)`);
+        console.log(`[EXECUTE-CLAIM-V2] SPL Token transfer: ${amountToClaim} tokens (${amountInBaseUnits} base units, ${actualDecimals} decimals)`);
 
         transferInstructions.push(
           createTransferInstruction(

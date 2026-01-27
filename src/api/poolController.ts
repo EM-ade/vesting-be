@@ -18,6 +18,7 @@ import {
 } from '../utils/roundingUtils';
 import { simulateStreamflowPoolCreation, validatePoolParameters } from '../utils/transactionSimulation';
 import { getRPCConfig } from '../config';
+import { getTokenDecimals } from '../utils/tokenProgramDetection';
 
 interface ValidationResult {
   valid: boolean;
@@ -230,8 +231,13 @@ export class PoolController {
             console.log(`[VALIDATION] Token account (ATA): ${treasuryTokenAccount.toBase58()}`);
 
             const tokenAccountInfo = await getAccount(this.connection, treasuryTokenAccount);
-            const tokenBalance = Number(tokenAccountInfo.amount) / 1e9;
+            
+            // Get actual token decimals instead of hardcoding 9
+            const decimals = await getTokenDecimals(this.connection, tokenMintToCheck);
+            const tokenBalance = Number(tokenAccountInfo.amount) / Math.pow(10, decimals);
             result.checks.tokenBalance.current = tokenBalance;
+            
+            console.log(`[VALIDATION] Token balance: ${tokenBalance} (${decimals} decimals)`);
 
             console.log(`[VALIDATION] Token balance found: ${tokenBalance}`);
 
@@ -772,8 +778,11 @@ export class PoolController {
                 
                 try {
                   const vaultAtaInfo = await getAccount(this.connection, vaultAta);
-                  const vaultBalance = Number(vaultAtaInfo.amount) / 1e9;
-                  console.log(`[POOL] ✅ Treasury vault ATA exists with balance: ${vaultBalance}`);
+                  
+                  // Get actual token decimals instead of hardcoding 9
+                  const decimals = await getTokenDecimals(this.connection, tokenMint);
+                  const vaultBalance = Number(vaultAtaInfo.amount) / Math.pow(10, decimals);
+                  console.log(`[POOL] ✅ Treasury vault ATA exists with balance: ${vaultBalance} (${decimals} decimals)`);
                 } catch (vaultAtaError) {
                   console.error(`[POOL] ❌ Treasury vault ATA does not exist or has no balance`);
                   throw new Error(`Treasury vault token account not found. Please ensure you funded the vault in Step 4 before deploying.`);
@@ -825,8 +834,13 @@ export class PoolController {
             
             try {
               const tokenAccountInfo = await getAccount(this.connection, treasuryTokenAccount);
-              const tokenBalance = Number(tokenAccountInfo.amount) / 1e9;
+              
+              // Get actual token decimals instead of hardcoding 9
+              const decimals = await getTokenDecimals(this.connection, tokenMint);
+              const tokenBalance = Number(tokenAccountInfo.amount) / Math.pow(10, decimals);
               const requiredTokens = total_pool_amount * 1.005;
+              
+              console.log(`[STREAMFLOW] SPL Token - Treasury token balance: ${tokenBalance} (${decimals} decimals)`);
               
               console.log(`[STREAMFLOW] SPL Token - Treasury token balance: ${tokenBalance}`);
               console.log(`[STREAMFLOW] Required tokens: ${requiredTokens} (${total_pool_amount} pool + 0.5% buffer)`);

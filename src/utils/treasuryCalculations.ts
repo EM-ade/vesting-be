@@ -10,8 +10,7 @@ export async function calculateLockedTokens(
   supabase: any,
   tokenMint?: string
 ): Promise<number> {
-  const TOKEN_DECIMALS = 9;
-  const TOKEN_DIVISOR = Math.pow(10, TOKEN_DECIMALS);
+  // DO NOT hardcode decimals - fetch from mint for accurate calculations
 
   // Get all active pools for this project (includes PAUSED, excludes CANCELLED)
   let poolsQuery = supabase
@@ -33,6 +32,32 @@ export async function calculateLockedTokens(
 
   if (!pools || pools.length === 0) {
     return 0;
+  }
+
+  // Get decimals for each unique token mint in pools
+  const uniqueMints: string[] = [...new Set(pools.map((p: any) => p.token_mint).filter((m: any) => m && typeof m === 'string') as string[])];
+  const decimalsByMint = new Map<string, number>();
+  
+  // Import dependencies dynamically to avoid circular dependencies
+  const { Connection, PublicKey } = await import("@solana/web3.js");
+  const { getMint } = await import("@solana/spl-token");
+  const configModule = await import("../config");
+  
+  // Get RPC connection (use global config)
+  const rpcConfig = configModule.getRPCConfig();
+  const connection = new Connection(rpcConfig.getRPCEndpoint(), 'confirmed');
+  
+  // Fetch decimals for each unique mint
+  for (const mint of uniqueMints) {
+    try {
+      const mintPubkey = new PublicKey(mint);
+      const mintInfo = await getMint(connection, mintPubkey);
+      decimalsByMint.set(mint, mintInfo.decimals);
+      console.log(`[LOCKED-TOKENS] Mint ${mint} has ${mintInfo.decimals} decimals`);
+    } catch (err) {
+      console.warn(`[LOCKED-TOKENS] Failed to get decimals for ${mint}, using default 9:`, err);
+      decimalsByMint.set(mint, 9);
+    }
   }
 
   // Optimization: Batch fetch vestings and claims to avoid N+1 queries
@@ -77,6 +102,10 @@ export async function calculateLockedTokens(
     // USE TOTAL POOL AMOUNT (Reserve full capacity, including unallocated)
     const poolTotal = pool.total_pool_amount;
 
+    // Get decimals for this pool's token mint
+    const poolDecimals = decimalsByMint.get(pool.token_mint) || 9;
+    const poolDivisor = Math.pow(10, poolDecimals);
+
     // Calculate total claimed for this pool
     let poolClaimedRaw = 0;
     const poolVestingIds = vestingsByPool.get(pool.id) || [];
@@ -85,11 +114,14 @@ export async function calculateLockedTokens(
       poolClaimedRaw += claimsByVesting.get(vid) || 0;
     }
 
-    const poolClaimed = poolClaimedRaw / TOKEN_DIVISOR;
+    const poolClaimed = poolClaimedRaw / poolDivisor;
 
     // Locked = Total Capacity - Total Claimed
     // This ensures unallocated tokens in active pools are still treated as locked
-    totalLocked += Math.max(0, poolTotal - poolClaimed);
+    const poolLocked = Math.max(0, poolTotal - poolClaimed);
+    totalLocked += poolLocked;
+    
+    console.log(`[LOCKED-TOKENS] Pool ${pool.id}: ${poolLocked} tokens locked (${poolDecimals} decimals)`);
   }
 
   return totalLocked;
