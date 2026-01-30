@@ -813,17 +813,18 @@ export class UserVestingController {
         }
       }
 
-      // Round down totalAvailable to 2 decimal places
-      const roundedTotalAvailable = Math.floor(totalAvailable * 100) / 100;
-
-      if (roundedTotalAvailable <= 0) {
+      // ✅ FIX: Don't round down - allow any amount to be claimable (user pays gas)
+      // Users should be able to claim even tiny amounts like 0.0001 SOL if they want
+      if (totalAvailable <= 0) {
         return res.status(400).json({ error: "No tokens available to claim" });
       }
 
-      // Determine actual claim amount
+      // Determine actual claim amount (use full precision)
       const actualClaimAmount = amountToClaim
-        ? Math.min(amountToClaim, roundedTotalAvailable)
-        : roundedTotalAvailable;
+        ? Math.min(amountToClaim, totalAvailable)
+        : totalAvailable;
+      
+      console.log(`[CLAIM] Total available: ${totalAvailable}, claiming: ${actualClaimAmount}`);
 
       if (actualClaimAmount <= 0) {
         return res.status(400).json({ error: "Invalid claim amount" });
@@ -852,7 +853,7 @@ export class UserVestingController {
       }
 
       console.log(
-        `[CLAIM] Total available: ${roundedTotalAvailable}, claiming: ${actualClaimAmount}`
+        `[CLAIM] Total available: ${totalAvailable}, claiming: ${actualClaimAmount}`
       );
       console.log(`[CLAIM] Pool breakdown:`, poolBreakdown);
 
@@ -1310,7 +1311,7 @@ export class UserVestingController {
         lastValidBlockHeight,
         claimDetails: {
           amountToClaim: actualClaimAmount,
-          totalAvailable: roundedTotalAvailable,
+          totalAvailable: totalAvailable,
           poolBreakdown,
         },
         feeDetails: {
@@ -1454,15 +1455,17 @@ export class UserVestingController {
         }
       }
 
-      const roundedTotalAvailable = Math.floor(totalAvailable * 100) / 100;
-      if (roundedTotalAvailable <= 0) {
+      // ✅ FIX: Don't round down - allow any amount to be claimable (user pays gas)
+      if (totalAvailable <= 0) {
         return res.status(400).json({ error: "No tokens available to claim" });
       }
 
-      const actualClaimAmount = amountToClaim ? Math.min(amountToClaim, roundedTotalAvailable) : roundedTotalAvailable;
+      const actualClaimAmount = amountToClaim ? Math.min(amountToClaim, totalAvailable) : totalAvailable;
       if (actualClaimAmount <= 0) {
         return res.status(400).json({ error: "Invalid claim amount" });
       }
+      
+      console.log(`[CLAIM-V2] Total available: ${totalAvailable}, claiming: ${actualClaimAmount}`);
 
       // Distribute claim amount across pools (FIFO)
       let remainingToClaim = actualClaimAmount;
@@ -1482,7 +1485,7 @@ export class UserVestingController {
         });
       }
 
-      console.log(`[CLAIM-V2] Total available: ${roundedTotalAvailable}, claiming: ${actualClaimAmount}`);
+      console.log(`[CLAIM-V2] Total available: ${totalAvailable}, claiming: ${actualClaimAmount}`);
       console.log(`[CLAIM-V2] Pool breakdown:`, poolBreakdown);
 
       // Get project context
@@ -1603,7 +1606,7 @@ export class UserVestingController {
           claimToken,
           claimDetails: {
             amountToClaim: actualClaimAmount,
-            totalAvailable: roundedTotalAvailable,
+            totalAvailable: totalAvailable,
             poolBreakdown,
           },
           feeDetails: {
@@ -1659,7 +1662,7 @@ export class UserVestingController {
         lastValidBlockHeight,
         claimDetails: {
           amountToClaim: actualClaimAmount,
-          totalAvailable: roundedTotalAvailable,
+          totalAvailable: totalAvailable,
           poolBreakdown,
         },
         feeDetails: {
@@ -2468,15 +2471,8 @@ export class UserVestingController {
           .json({ error: "amountToClaim must be greater than 0" });
       }
 
-      // Minimum claim amount: 0.001 tokens (1,000,000 base units)
-      const MIN_CLAIM_AMOUNT = 0.001;
-      if (amountToClaim < MIN_CLAIM_AMOUNT) {
-        return res.status(400).json({
-          error: `Minimum claim amount is ${MIN_CLAIM_AMOUNT} tokens. You requested ${amountToClaim} tokens.`,
-          minimumAmount: MIN_CLAIM_AMOUNT,
-          requestedAmount: amountToClaim,
-        });
-      }
+      // ? FIX: Removed minimum claim amount restriction
+      // Users can claim any amount, even tiny amounts like 0.0001 tokens
 
       // Get all active vesting pools for user
       const { data: vestings, error: vestingError } =
@@ -2613,16 +2609,14 @@ export class UserVestingController {
         });
       }
 
-      // Round down totalAvailable to 2 decimal places to match what frontend shows
-      const roundedTotalAvailable = Math.floor(totalAvailable * 100) / 100;
-
+      // ? FIX: Don't round down - allow any amount to be claimable
       // Validate requested amount
-      if (amountToClaim > roundedTotalAvailable) {
+      if (amountToClaim > totalAvailable) {
         return res.status(400).json({
           error: `Requested amount ${amountToClaim.toFixed(
             2
-          )} exceeds available balance ${roundedTotalAvailable.toFixed(2)}`,
-          available: roundedTotalAvailable,
+          )} exceeds available balance ${totalAvailable.toFixed(2)}`,
+          available: totalAvailable,
           requested: amountToClaim,
         });
       }
@@ -3117,15 +3111,8 @@ export class UserVestingController {
           .json({ error: "amountToClaim must be greater than 0" });
       }
 
-      // Minimum claim amount: 0.001 tokens (1,000,000 base units)
-      const MIN_CLAIM_AMOUNT = 0.001;
-      if (amountToClaim < MIN_CLAIM_AMOUNT) {
-        return res.status(400).json({
-          error: `Minimum claim amount is ${MIN_CLAIM_AMOUNT} tokens. You requested ${amountToClaim} tokens.`,
-          minimumAmount: MIN_CLAIM_AMOUNT,
-          requestedAmount: amountToClaim,
-        });
-      }
+      // ? FIX: Removed minimum claim amount restriction
+      // Users can claim any amount, even tiny amounts like 0.0001 tokens
 
       // Get all active vesting pools for user
       const { data: vestings, error: vestingError } =
@@ -3262,16 +3249,14 @@ export class UserVestingController {
         });
       }
 
-      // Round down totalAvailable to 2 decimal places to match what frontend shows
-      const roundedTotalAvailable = Math.floor(totalAvailable * 100) / 100;
-
+      // ? FIX: Don't round down - allow any amount to be claimable
       // Validate requested amount
-      if (amountToClaim > roundedTotalAvailable) {
+      if (amountToClaim > totalAvailable) {
         return res.status(400).json({
           error: `Requested amount ${amountToClaim.toFixed(
             2
-          )} exceeds available balance ${roundedTotalAvailable.toFixed(2)}`,
-          available: roundedTotalAvailable,
+          )} exceeds available balance ${totalAvailable.toFixed(2)}`,
+          available: totalAvailable,
           requested: amountToClaim,
         });
       }
