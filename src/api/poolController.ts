@@ -372,6 +372,19 @@ export class PoolController {
               result.valid = false;
             }
 
+            // NEW: Validate weight (if provided)
+            if (rule.weight !== undefined && rule.weight <= 0) {
+              result.checks.allocations.valid = false;
+              result.checks.allocations.message = `Weight must be greater than 0 in rule "${rule.name}"`;
+              result.errors.push(result.checks.allocations.message);
+              result.valid = false;
+            }
+
+            // NEW: Warn if weight is very high
+            if (rule.weight && rule.weight > 10) {
+              result.warnings.push(`Rule "${rule.name}" has a very high weight (${rule.weight}). This will significantly skew distribution.`);
+            }
+
             // Sum up percentages
             if (rule.allocationType === 'PERCENTAGE') {
               totalPercentage += rule.allocationValue;
