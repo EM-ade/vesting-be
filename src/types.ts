@@ -35,6 +35,7 @@ export interface EligibilityResult {
   nftCount: number;
   tier?: NFTTier;
   percentage: number;
+  weightedScore?: number; // NEW: Total weighted score for this wallet
 }
 
 // Multi-user vesting pool types
@@ -119,6 +120,8 @@ export interface SnapshotRule {
   allocationType: 'FIXED' | 'PERCENTAGE';
   allocationValue: number;
   enabled: boolean;
+  weight?: number; // NEW: Weight multiplier for distribution (default: 1.0)
+  description?: string; // NEW: Optional description of the rule
 }
 
 export interface SnapshotConfig {
