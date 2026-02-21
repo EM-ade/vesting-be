@@ -66,6 +66,7 @@ export class PoolController {
       allocationType: string;
       allocationValue: number;
       enabled: boolean;
+      weight?: number;
     }>;
     projectId?: string;
     token_mint?: string; // Per-pool token mint
