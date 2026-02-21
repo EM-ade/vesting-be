@@ -82,15 +82,17 @@ export async function syncDynamicPool(pool: any) {
       }
       
       console.log(`  ✅ Found ${holders.length} total holders`);
-      
+
       // Filter by threshold
       const eligibleHolders = holders.filter((h: any) => h.nftCount >= rule.threshold);
       console.log(`  ${eligibleHolders.length} holders meet threshold of ${rule.threshold}`);
-      
-      // Calculate total NFTs held by eligible holders (for weighted distribution)
-      const totalNFTs = eligibleHolders.reduce((sum: number, h: any) => sum + h.nftCount, 0);
-      console.log(`  Total NFTs held by eligible holders: ${totalNFTs}`);
-      
+
+      // Calculate weighted NFTs held by eligible holders (for weighted distribution)
+      // Weight formula: nftCount * rule.weight (default 1.0)
+      const ruleWeight = rule.weight || 1.0;
+      const totalWeightedNFTs = eligibleHolders.reduce((sum: number, h: any) => sum + (h.nftCount * ruleWeight), 0);
+      console.log(`  Total weighted NFTs held by eligible holders: ${totalWeightedNFTs} (weight: ${ruleWeight}x)`);
+
       // Calculate pool share for this rule
       let poolShare: number;
       if (rule.allocationType === 'PERCENTAGE') {
@@ -99,17 +101,18 @@ export async function syncDynamicPool(pool: any) {
         // Fixed amount total for this rule
         poolShare = rule.allocationValue;
       }
-      
+
       console.log(`  Pool share for this rule: ${poolShare.toFixed(2)} tokens`);
-      console.log(`  Using weighted allocation based on NFT count`);
+      console.log(`  Using weighted allocation: (holderNFTs * weight) / totalWeightedNFTs × poolShare`);
       
       // Add/update users with weighted allocation
       for (const holder of eligibleHolders) {
         // Track this wallet as eligible
         allEligibleWallets.add(holder.wallet);
-        
-        // Calculate weighted allocation: (holder's NFTs / total NFTs) × pool share
-        const allocationPerUser = (holder.nftCount / totalNFTs) * poolShare;
+
+        // Calculate weighted allocation: (holder's NFTs * weight) / totalWeightedNFTs × pool share
+        const holderWeightedNFTs = holder.nftCount * ruleWeight;
+        const allocationPerUser = totalWeightedNFTs > 0 ? (holderWeightedNFTs / totalWeightedNFTs) * poolShare : 0;
         
         // Check if user already has vesting for this pool
         const { data: existing, error: fetchError } = await dbService.supabase
