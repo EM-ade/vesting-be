@@ -1559,6 +1559,79 @@ export class UserVestingController {
 
       const userPublicKey = new PublicKey(userWallet);
 
+      // ===== VAULT BALANCE VERIFICATION =====
+      // Check if vault has sufficient tokens before allowing the claim
+      console.log(`[CLAIM-V2] Verifying vault has sufficient tokens...`);
+      
+      try {
+        const vaultKeypair = await getVaultKeypairForProject(project.id);
+        const vaultPublicKey = vaultKeypair.publicKey;
+        
+        // Check vault SOL balance (for gas fees)
+        const vaultSOLBalance = await this.connection.getBalance(vaultPublicKey);
+        const minSOLForGas = 0.01 * LAMPORTS_PER_SOL; // Minimum 0.01 SOL for gas
+        if (vaultSOLBalance < minSOLForGas) {
+          console.error(`[CLAIM-V2] ✗ Vault has insufficient SOL: ${vaultSOLBalance / LAMPORTS_PER_SOL} SOL (min: ${minSOLForGas / LAMPORTS_PER_SOL} SOL)`);
+          return res.status(503).json({
+            error: "Claims are temporarily unavailable due to high demand. Please try again in a few minutes.",
+            retryAfter: 300, // Suggest waiting 5 minutes
+          });
+        }
+        console.log(`[CLAIM-V2] ✓ Vault SOL balance: ${vaultSOLBalance / LAMPORTS_PER_SOL} SOL`);
+
+        // Check vault token balance (if not native SOL)
+        const NATIVE_SOL_MINT = "So11111111111111111111111111111111111111112";
+        const isNativeSOL = tokenMintAddress === NATIVE_SOL_MINT;
+
+        if (!isNativeSOL && tokenMintAddress) {
+          const { detectTokenProgram } = await import("../utils/tokenProgramDetection");
+          const { getAssociatedTokenAddress } = await import("@solana/spl-token");
+          
+          const tokenProgramId = await detectTokenProgram(this.connection, new PublicKey(tokenMintAddress));
+          const vaultTokenAccount = await getAssociatedTokenAddress(
+            new PublicKey(tokenMintAddress),
+            vaultPublicKey,
+            false,
+            tokenProgramId
+          );
+
+          try {
+            const vaultTokenAccountInfo = await this.connection.getTokenAccountBalance(vaultTokenAccount);
+            const vaultTokenBalance = vaultTokenAccountInfo.value.uiAmount || 0;
+            
+            if (vaultTokenBalance < actualClaimAmount) {
+              console.error(`[CLAIM-V2] ✗ Vault has insufficient tokens: ${vaultTokenBalance} (claiming: ${actualClaimAmount})`);
+              return res.status(503).json({
+                error: "Claims are temporarily unavailable due to high demand. Please try again in a few minutes.",
+                retryAfter: 300, // Suggest waiting 5 minutes
+              });
+            }
+            console.log(`[CLAIM-V2] ✓ Vault token balance: ${vaultTokenBalance} (claiming: ${actualClaimAmount})`);
+          } catch (tokenErr) {
+            console.error(`[CLAIM-V2] ✗ Vault token account not found or error:`, tokenErr);
+            return res.status(503).json({
+              error: "Claims are temporarily unavailable. Please contact support if this issue persists.",
+              retryAfter: 300,
+            });
+          }
+        } else if (isNativeSOL) {
+          // For native SOL, check if vault has enough for the claim
+          const requiredVaultSOL = actualClaimAmount * LAMPORTS_PER_SOL;
+          if (vaultSOLBalance < requiredVaultSOL + minSOLForGas) {
+            console.error(`[CLAIM-V2] ✗ Vault has insufficient SOL for claim: ${vaultSOLBalance / LAMPORTS_PER_SOL} SOL (required: ${requiredVaultSOL / LAMPORTS_PER_SOL + 0.01} SOL)`);
+            return res.status(503).json({
+              error: "Claims are temporarily unavailable due to high demand. Please try again in a few minutes.",
+              retryAfter: 300, // Suggest waiting 5 minutes
+            });
+          }
+          console.log(`[CLAIM-V2] ✓ Vault SOL balance: ${vaultSOLBalance / LAMPORTS_PER_SOL} SOL (claiming: ${actualClaimAmount} SOL)`);
+        }
+      } catch (err) {
+        console.error(`[CLAIM-V2] Failed to verify vault balance:`, err);
+        // Don't block the claim if we can't verify, but log the error
+        console.warn(`[CLAIM-V2] Proceeding with claim despite verification error`);
+      }
+
       // ===== BUILD FEE-ONLY TRANSACTION (Single signer: User) =====
       const feeInstructions = [];
 
